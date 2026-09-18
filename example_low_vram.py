@@ -69,7 +69,7 @@ def main():
     total_gb = offload.gpu_total_memory_gb()
     avail_ram, total_ram = offload.host_memory_gb()
     print(f"GPU VRAM: {total_gb:.2f} GB  |  pipeline_type={PIPELINE_TYPE}")
-        if total_ram:
+    if total_ram:
         print(f"WSL RAM:  {avail_ram:.1f} GiB free / {total_ram:.1f} GiB total")
         if total_ram < 16:
             print(
