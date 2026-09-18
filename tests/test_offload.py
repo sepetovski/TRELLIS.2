@@ -70,6 +70,13 @@ class OffloadTests(unittest.TestCase):
         self.assertNotIn("a", store)
         self.assertIn("b", store)
 
+    def test_nested_blocks_are_treated_as_vae(self):
+        nested = nn.Module()
+        nested.blocks = nn.ModuleList([nn.ModuleList([TinyBlock()]), nn.ModuleList([TinyBlock()])])
+        self.assertTrue(offload.is_nested_block_model(nested))
+        self.assertFalse(offload.should_dit_block_offload(nested))
+        self.assertFalse(offload.is_nested_block_model(TinyDiT()))
+
     def test_recommend_pin_memory_default_off(self):
         self.assertFalse(offload.recommend_pin_memory())
 

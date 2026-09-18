@@ -475,29 +475,49 @@ class SparseUnetVaeDecoder(nn.Module):
                     nn.init.constant_(module.bias, 0)
         self.apply(_basic_init)
 
+    def _run_decoder_stage(self, i, res, h, guide_subs, subs_gt, subs):
+        for j, block in enumerate(res):
+            if i < len(self.blocks) - 1 and j == len(res) - 1:
+                if self.pred_subdiv:
+                    if self.training:
+                        subs_gt.append(h.get_spatial_cache('subdivision'))
+                    h, sub = block(h)
+                    subs.append(sub)
+                else:
+                    h = block(h, subdiv=guide_subs[i] if guide_subs is not None else None)
+            else:
+                h = block(h)
+        return h
+
     def forward(self, x: sp.SparseTensor, guide_subs: Optional[List[sp.SparseTensor]] = None, return_subs: bool = False) -> sp.SparseTensor:
         assert guide_subs is None or self.pred_subdiv == False, "Only decoders with pred_subdiv=False can be used with guide_subs"
         assert return_subs == False or self.pred_subdiv == True, "Only decoders with pred_subdiv=True can be used with return_subs"
-        
+
+        device = x.device
+        if self.low_vram:
+            self.from_latent.to(device)
         h = self.from_latent(x)
+        if self.low_vram:
+            self.from_latent.cpu()
         h = h.type(self.dtype)
         subs_gt = []
         subs = []
         for i, res in enumerate(self.blocks):
-            for j, block in enumerate(res):
-                if i < len(self.blocks) - 1 and j == len(res) - 1:
-                    if self.pred_subdiv:
-                        if self.training:
-                            subs_gt.append(h.get_spatial_cache('subdivision'))
-                        h, sub = block(h)
-                        subs.append(sub)
-                    else:
-                        h = block(h, subdiv=guide_subs[i] if guide_subs is not None else None)
-                else:
-                    h = block(h)
+            if self.low_vram:
+                print(f"[TRELLIS.2] VAE decode level {i + 1}/{len(self.blocks)}")
+                res.to(device)
+            h = self._run_decoder_stage(i, res, h, guide_subs, subs_gt, subs)
+            if self.low_vram:
+                res.cpu()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
         h = h.type(x.dtype)
         h = h.replace(F.layer_norm(h.feats, h.feats.shape[-1:]))
+        if self.low_vram:
+            self.output_layer.to(device)
         h = self.output_layer(h)
+        if self.low_vram:
+            self.output_layer.cpu()
         if self.training and self.pred_subdiv:
             return h, subs_gt, subs
         else:
@@ -508,15 +528,26 @@ class SparseUnetVaeDecoder(nn.Module):
     
     def upsample(self, x: sp.SparseTensor, upsample_times: int) -> torch.Tensor:
         assert self.pred_subdiv == True, "Only decoders with pred_subdiv=True can be used with upsampling"
-        
+
+        device = x.device
+        if self.low_vram:
+            self.from_latent.to(device)
         h = self.from_latent(x)
+        if self.low_vram:
+            self.from_latent.cpu()
         h = h.type(self.dtype)
         for i, res in enumerate(self.blocks):
             if i == upsample_times:
                 return h.coords
+            if self.low_vram:
+                res.to(device)
             for j, block in enumerate(res):
                 if i < len(self.blocks) - 1 and j == len(res) - 1:
                     h, sub = block(h)
                 else:
                     h = block(h)
+            if self.low_vram:
+                res.cpu()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
        

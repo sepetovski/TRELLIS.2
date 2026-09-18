@@ -487,9 +487,16 @@ class Trellis2ImageTo3DPipeline(Pipeline):
             tex_slat (SparseTensor): The structured latent for texture.
             resolution (int): The resolution of the output.
         """
+        parked_tex = None
+        if self.low_vram and hasattr(tex_slat, "cpu"):
+            parked_tex = tex_slat.cpu()
+            tex_slat = parked_tex
+            offload.release_cuda_memory()
         meshes, subs = self.decode_shape_slat(shape_slat, resolution)
         if self.low_vram:
             self.drop_models("shape_slat_decoder")
+            if parked_tex is not None:
+                tex_slat = parked_tex.to(self.device)
         tex_voxels = self.decode_tex_slat(tex_slat, subs)
         if self.low_vram:
             self.drop_models("tex_slat_decoder")

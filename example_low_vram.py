@@ -71,18 +71,13 @@ def main():
     print(f"GPU VRAM: {total_gb:.2f} GB  |  pipeline_type={PIPELINE_TYPE}")
     if total_ram:
         print(f"WSL RAM:  {avail_ram:.1f} GiB free / {total_ram:.1f} GiB total")
-        if total_ram < 16:
+        if total_ram < 10:
             print(
-                "WSL RAM cap is too small for a full run. Do this in Windows "
-                "before the next attempt (required after 'device not ready'):"
+                "WSL RAM cap is still under 10 GiB. Set memory=12GB (or 16GB) "
+                "in %UserProfile%\\.wslconfig, then PowerShell: wsl --shutdown"
             )
-            print("  1. Close Ubuntu")
-            print("  2. Create file C:\\Users\\<you>\\.wslconfig with:")
-            print("       [wsl2]")
-            print("       memory=16GB")
-            print("       swap=16GB")
-            print("  3. PowerShell as user:  wsl --shutdown")
-            print("  4. Reopen Ubuntu; this line should show >=16 GiB total")
+        elif total_ram < 13:
+            print("WSL RAM cap ~12 GiB is OK for the 512 pipeline (one model at a time).")
     if total_gb and total_gb < 6:
         print(
             "Expect several minutes per stage: each 1.3B DiT streams 30 "

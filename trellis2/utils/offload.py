@@ -144,6 +144,23 @@ def release_cuda_memory() -> None:
         pass
 
 
+def is_nested_block_model(model: nn.Module) -> bool:
+    """VAEs store `blocks` as a list of resolution stages, not a flat DiT."""
+    blocks = getattr(model, "blocks", None)
+    if blocks is None:
+        return False
+    return any(isinstance(item, nn.ModuleList) for item in blocks)
+
+
+def should_dit_block_offload(model: nn.Module) -> bool:
+    """Only stream large flat DiTs. 36 tiny VAE convs on a 4 GB card just fault the driver."""
+    if not isinstance(model, nn.Module) or not hasattr(model, "blocks"):
+        return False
+    if is_nested_block_model(model):
+        return False
+    return module_nbytes(model) >= int(1.2 * 1024 ** 3)
+
+
 def iter_offload_blocks(model: nn.Module) -> Iterator[nn.Module]:
     """Yield leaf blocks from `model.blocks` (flat or nested ModuleList)."""
     blocks = getattr(model, "blocks", None)
@@ -279,7 +296,18 @@ def stage_model(
         already = bool(getattr(model, _OFFLOAD_HOOK_ATTR, None)) and str(
             getattr(model, _OFFLOAD_DEVICE_ATTR, None)
         ) == str(torch.device(device))
-        if block_offload and isinstance(model, nn.Module) and hasattr(model, "blocks"):
+        if block_offload and is_nested_block_model(model):
+            move_non_block_modules(model, device)
+            for stage in model.blocks:
+                stage.to("cpu")
+            if hasattr(model, "low_vram"):
+                model.low_vram = True
+            if os.environ.get("TRELLIS_OFFLOAD_LOG", "1").strip().lower() not in ("0", "false", "no"):
+                print(
+                    f"[TRELLIS.2] VAE stage offload: {type(model).__name__} "
+                    f"({len(model.blocks)} resolution levels, one on GPU at a time)"
+                )
+        elif block_offload and should_dit_block_offload(model):
             n_blocks = enable_module_block_offload(model, device, pin_memory=recommend_pin_memory())
             move_non_block_modules(model, device)
             if n_blocks and not already and os.environ.get("TRELLIS_OFFLOAD_LOG", "1").strip().lower() not in ("0", "false", "no"):
@@ -293,8 +321,10 @@ def stage_model(
         log_vram(f"after stage {type(model).__name__}")
     else:
         if block_offload and isinstance(model, nn.Module) and hasattr(model, "blocks"):
-            # Keep hooked blocks on (pinned) CPU; only evict embeddings / I/O.
             move_non_block_modules(model, "cpu")
+            if is_nested_block_model(model):
+                for stage in model.blocks:
+                    stage.to("cpu")
         elif hasattr(model, "cpu"):
             model.cpu()
         elif hasattr(model, "to"):
