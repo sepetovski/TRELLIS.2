@@ -189,8 +189,14 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         else:
             input = input.convert('RGB')
             self._ensure_rembg()
-            with self._model_on_device(self.rembg_model):
+            # BiRefNet at 1024² does not fit a 4 GB card. Keep it on CPU.
+            if self.low_vram:
+                print("[TRELLIS.2] Removing background on CPU (slow, but safe on 4 GB).")
+                self.rembg_model.cpu()
                 output = self.rembg_model(input)
+            else:
+                with self._model_on_device(self.rembg_model):
+                    output = self.rembg_model(input)
         output_np = np.array(output)
         alpha = output_np[:, :, 3]
         bbox = np.argwhere(alpha > 0.8 * 255)

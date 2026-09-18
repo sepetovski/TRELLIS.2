@@ -48,6 +48,7 @@ Optional live VRAM log:
     TRELLIS_VRAM_LOG=1 python example_low_vram.py
 """
 import os
+import sys
 os.environ["OPENCV_IO_ENABLE_OPENEXR"] = "1"
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True,max_split_size_mb:128"
 
@@ -92,7 +93,16 @@ def main():
     pipeline.block_offload = True
     pipeline.cuda()
 
-    image = Image.open(IMAGE_PATH)
+    image_path = sys.argv[1] if len(sys.argv) > 1 else IMAGE_PATH
+    if not os.path.isfile(image_path):
+        raise FileNotFoundError(
+            f"Image not found: {image_path}\n"
+            "Copy a PNG/JPG into WSL, then run:\n"
+            "  python example_low_vram.py /home/damjan/TRELLIS.2/myphoto.png\n"
+            "Windows files are under /mnt/c/Users/<you>/..."
+        )
+    print(f"Using image: {os.path.abspath(image_path)}")
+    image = Image.open(image_path)
     mesh = pipeline.run(image, pipeline_type=PIPELINE_TYPE)[0]
     mesh.simplify(16777216)
     offload.release_cuda_memory()
