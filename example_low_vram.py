@@ -69,14 +69,20 @@ def main():
     total_gb = offload.gpu_total_memory_gb()
     avail_ram, total_ram = offload.host_memory_gb()
     print(f"GPU VRAM: {total_gb:.2f} GB  |  pipeline_type={PIPELINE_TYPE}")
-    if total_ram:
+        if total_ram:
         print(f"WSL RAM:  {avail_ram:.1f} GiB free / {total_ram:.1f} GiB total")
-        if total_ram < 12:
+        if total_ram < 16:
             print(
-                "Warning: WSL has under 12 GiB RAM. The 1.3B DiTs plus BiRefNet "
-                "and DINOv3 can get the Linux OOM killer (`Killed`). Raise "
-                "memory= in %UserProfile%\\.wslconfig if this happens."
+                "WSL RAM cap is too small for a full run. Do this in Windows "
+                "before the next attempt (required after 'device not ready'):"
             )
+            print("  1. Close Ubuntu")
+            print("  2. Create file C:\\Users\\<you>\\.wslconfig with:")
+            print("       [wsl2]")
+            print("       memory=16GB")
+            print("       swap=16GB")
+            print("  3. PowerShell as user:  wsl --shutdown")
+            print("  4. Reopen Ubuntu; this line should show >=16 GiB total")
     if total_gb and total_gb < 6:
         print(
             "Expect several minutes per stage: each 1.3B DiT streams 30 "

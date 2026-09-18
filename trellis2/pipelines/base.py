@@ -54,17 +54,28 @@ class Pipeline:
         if names is None and hasattr(cls, 'model_names_to_load'):
             names = cls.model_names_to_load
 
-        _models = {}
+        specs = {}
         for k, v in args['models'].items():
             if names is not None and k not in names:
                 continue
-            try:
-                _models[k] = models.from_pretrained(f"{path}/{v}")
-            except Exception as e:
-                _models[k] = models.from_pretrained(v)
+            specs[k] = v
 
+        pretrained_root = path
+
+        def _load_one(name, spec):
+            print(f"[TRELLIS.2] Loading {name} into RAM...")
+            try:
+                model = models.from_pretrained(f"{pretrained_root}/{spec}")
+            except Exception:
+                model = models.from_pretrained(spec)
+            model.eval()
+            offload.log_host_memory(f"loaded {name}")
+            return model
+
+        _models = offload.LazyModelMap(_load_one, specs)
         new_pipeline = cls(_models)
         new_pipeline._pretrained_args = args
+        new_pipeline._model_specs = specs
         return new_pipeline
 
     def _resolve_block_offload(self) -> bool:
@@ -117,8 +128,12 @@ class Pipeline:
         raise RuntimeError("No device found.")
 
     def to(self, device: torch.device) -> None:
-        for model in self.models.values():
-            model.to(device)
+        if hasattr(self.models, "_specs"):
+            for name in list(self.models._specs):
+                self.models[name]
+        for model in list(self.models.values()):
+            if hasattr(model, "to"):
+                model.to(device)
 
     def cuda(self) -> None:
         self.to(torch.device("cuda"))

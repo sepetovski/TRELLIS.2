@@ -345,6 +345,33 @@ def drop_module(obj) -> None:
     release_cuda_memory()
 
 
+class LazyModelMap(dict):
+    """Dict that loads a checkpoint the first time a key is accessed."""
+
+    def __init__(self, load_fn, specs: dict):
+        super().__init__()
+        self._load_fn = load_fn
+        self._specs = dict(specs)
+
+    def __contains__(self, key):
+        return key in self._specs or super().__contains__(key)
+
+    def __getitem__(self, key):
+        if super().__contains__(key):
+            return super().__getitem__(key)
+        if key not in self._specs:
+            raise KeyError(key)
+        model = self._load_fn(key, self._specs[key])
+        super().__setitem__(key, model)
+        return model
+
+    def pop(self, key, default=None):
+        self._specs.pop(key, None)
+        if super().__contains__(key):
+            return super().pop(key)
+        return default
+
+
 def drop_models(store: dict, keys: Iterable[str]) -> List[str]:
     """Delete named entries from a pipeline model dict and free host memory."""
     dropped = []

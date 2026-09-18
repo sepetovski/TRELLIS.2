@@ -120,8 +120,12 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         pipeline.shape_slat_normalization = args['shape_slat_normalization']
         pipeline.tex_slat_normalization = args['tex_slat_normalization']
 
-        pipeline.image_cond_model = getattr(image_feature_extractor, args['image_cond_model']['name'])(**args['image_cond_model']['args'])
-        pipeline.rembg_model = getattr(rembg, args['rembg_model']['name'])(**args['rembg_model']['args'])
+        # Do not load DINOv3 / rembg until they are used — together with the
+        # DiTs they blow past 12 GB WSL RAM.
+        pipeline._image_cond_spec = args['image_cond_model']
+        pipeline._rembg_spec = args['rembg_model']
+        pipeline.image_cond_model = None
+        pipeline.rembg_model = None
         
         pipeline.low_vram = args.get('low_vram', True)
         pipeline.block_offload = args.get('block_offload', 'auto')
@@ -141,9 +145,30 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         self._resolve_block_offload()
         if not self.low_vram:
             super().to(device)
-            self.image_cond_model.to(device)
+            self._ensure_image_cond()
+            if self.image_cond_model is not None:
+                self.image_cond_model.to(device)
+            self._ensure_rembg()
             if self.rembg_model is not None:
                 self.rembg_model.to(device)
+
+    def _ensure_rembg(self):
+        if self.rembg_model is None:
+            spec = getattr(self, "_rembg_spec", None)
+            if spec is None:
+                return
+            print("[TRELLIS.2] Loading rembg into RAM...")
+            self.rembg_model = getattr(rembg, spec["name"])(**spec["args"])
+            offload.log_host_memory("loaded rembg")
+
+    def _ensure_image_cond(self):
+        if self.image_cond_model is None:
+            spec = getattr(self, "_image_cond_spec", None)
+            if spec is None:
+                return
+            print("[TRELLIS.2] Loading image encoder (DINOv3) into RAM...")
+            self.image_cond_model = getattr(image_feature_extractor, spec["name"])(**spec["args"])
+            offload.log_host_memory("loaded image cond")
 
     def preprocess_image(self, input: Image.Image) -> Image.Image:
         """
@@ -163,6 +188,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
             output = input
         else:
             input = input.convert('RGB')
+            self._ensure_rembg()
             with self._model_on_device(self.rembg_model):
                 output = self.rembg_model(input)
         output_np = np.array(output)
@@ -189,6 +215,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         Returns:
             dict: The conditioning information
         """
+        self._ensure_image_cond()
         self.image_cond_model.image_size = resolution
         with self._model_on_device(self.image_cond_model):
             cond = self.image_cond_model(image)

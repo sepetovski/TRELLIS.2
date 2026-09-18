@@ -45,6 +45,24 @@ class OffloadTests(unittest.TestCase):
         model = TinyDiT()
         self.assertGreater(offload.module_nbytes(model), 0)
 
+    def test_lazy_model_map_loads_on_access(self):
+        loads = []
+
+        def load_fn(name, spec):
+            loads.append(name)
+            return TinyDiT()
+
+        store = offload.LazyModelMap(load_fn, {"a": "spec-a", "b": "spec-b"})
+        self.assertIn("a", store)
+        self.assertEqual(loads, [])
+        model = store["a"]
+        self.assertIsInstance(model, TinyDiT)
+        self.assertEqual(loads, ["a"])
+        self.assertIs(store["a"], model)
+        self.assertEqual(loads, ["a"])
+        store.pop("a")
+        self.assertNotIn("a", store)
+
     def test_drop_models_removes_keys(self):
         store = {"a": TinyDiT(), "b": TinyDiT()}
         dropped = offload.drop_models(store, ["a", "missing"])
