@@ -24,11 +24,24 @@ not fix that — it is a hard memory limit, not a timeout.
 This script:
   * loads only the 512 checkpoints (skips 1024 DiTs)
   * streams transformer blocks CPU ↔ GPU one layer at a time
+  * deletes each finished 1.3B DiT from RAM before the next stage
+    (a bare `Killed` with no CUDA traceback is the WSL OOM killer)
   * does not keep the HDRI on the GPU during generation
   * uses a smaller GLB export so postprocess does not OOM
 
+If WSL still `Killed`s the process, raise the WSL memory cap. In Windows
+create/edit `%UserProfile%\\.wslconfig`:
+
+    [wsl2]
+    memory=16GB
+    swap=8GB
+
+then `wsl --shutdown` in PowerShell and reopen the terminal.
+
 Usage (WSL, after `conda activate trellis2`):
     cd ~/TRELLIS.2
+    git fetch fork cursor/low-vram-block-offload-3548
+    git checkout cursor/low-vram-block-offload-3548
     python example_low_vram.py
 
 Optional live VRAM log:
@@ -54,7 +67,16 @@ PIPELINE_TYPE = os.environ.get("TRELLIS_PIPELINE_TYPE", "512")
 
 def main():
     total_gb = offload.gpu_total_memory_gb()
+    avail_ram, total_ram = offload.host_memory_gb()
     print(f"GPU VRAM: {total_gb:.2f} GB  |  pipeline_type={PIPELINE_TYPE}")
+    if total_ram:
+        print(f"WSL RAM:  {avail_ram:.1f} GiB free / {total_ram:.1f} GiB total")
+        if total_ram < 12:
+            print(
+                "Warning: WSL has under 12 GiB RAM. The 1.3B DiTs plus BiRefNet "
+                "and DINOv3 can get the Linux OOM killer (`Killed`). Raise "
+                "memory= in %UserProfile%\\.wslconfig if this happens."
+            )
     if total_gb and total_gb < 6:
         print(
             "Expect several minutes per stage: each 1.3B DiT streams 30 "

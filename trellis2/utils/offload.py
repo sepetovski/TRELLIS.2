@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import gc
 import os
-from typing import Iterator, List, Optional, Union
+from typing import Iterable, Iterator, List, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
@@ -77,6 +77,43 @@ def module_nbytes(module: nn.Module) -> int:
     for b in module.buffers():
         total += b.numel() * b.element_size()
     return total
+
+
+def host_memory_gb() -> Tuple[float, float]:
+    """Return (available_gb, total_gb) from /proc/meminfo, or (0, 0)."""
+    try:
+        info = {}
+        with open("/proc/meminfo", "r") as f:
+            for line in f:
+                key, value = line.split(":", 1)
+                info[key] = int(value.strip().split()[0]) / (1024 ** 2)
+        total = info.get("MemTotal", 0.0)
+        available = info.get("MemAvailable", info.get("MemFree", 0.0))
+        return available, total
+    except Exception:
+        return 0.0, 0.0
+
+
+def recommend_pin_memory() -> bool:
+    """Pinned weights cannot be swapped. Only pin when plenty of host RAM remains."""
+    env = os.environ.get("TRELLIS_PIN_MEMORY", "").strip().lower()
+    if env in ("1", "true", "yes"):
+        return True
+    if env in ("0", "false", "no"):
+        return False
+    available, total = host_memory_gb()
+    if total and total < 24:
+        return False
+    if available and available < 12:
+        return False
+    return False
+
+
+def log_host_memory(tag: str) -> None:
+    available, total = host_memory_gb()
+    if not total:
+        return
+    print(f"[RAM] {tag}: available={available:.1f}GiB / total={total:.1f}GiB")
 
 
 def log_vram(tag: str) -> None:
@@ -173,7 +210,7 @@ def disable_module_block_offload(model: nn.Module) -> None:
 def enable_module_block_offload(
     model: nn.Module,
     execution_device: Union[str, torch.device],
-    pin_memory: bool = True,
+    pin_memory: Optional[bool] = None,
 ) -> int:
     """
     Install forward hooks so each block is copied to `execution_device` just
@@ -192,6 +229,9 @@ def enable_module_block_offload(
         return len(blocks)
 
     disable_module_block_offload(model)
+
+    if pin_memory is None:
+        pin_memory = recommend_pin_memory()
 
     hooks = []
     nbytes = 0
@@ -240,7 +280,7 @@ def stage_model(
             getattr(model, _OFFLOAD_DEVICE_ATTR, None)
         ) == str(torch.device(device))
         if block_offload and isinstance(model, nn.Module) and hasattr(model, "blocks"):
-            n_blocks = enable_module_block_offload(model, device)
+            n_blocks = enable_module_block_offload(model, device, pin_memory=recommend_pin_memory())
             move_non_block_modules(model, device)
             if n_blocks and not already and os.environ.get("TRELLIS_OFFLOAD_LOG", "1").strip().lower() not in ("0", "false", "no"):
                 gb = module_nbytes(model) / (1024 ** 3)
@@ -288,3 +328,34 @@ def models_for_pipeline_type(pipeline_type: str) -> List[str]:
     if pipeline_type not in mapping:
         raise ValueError(f"Unknown pipeline_type {pipeline_type!r}")
     return mapping[pipeline_type]
+
+
+def drop_module(obj) -> None:
+    """Drop a model from RAM (hooks, parameters, then GC)."""
+    if obj is None:
+        return
+    if isinstance(obj, nn.Module):
+        disable_module_block_offload(obj)
+    if hasattr(obj, "cpu"):
+        try:
+            obj.cpu()
+        except Exception:
+            pass
+    del obj
+    release_cuda_memory()
+
+
+def drop_models(store: dict, keys: Iterable[str]) -> List[str]:
+    """Delete named entries from a pipeline model dict and free host memory."""
+    dropped = []
+    for key in keys:
+        model = store.pop(key, None)
+        if model is None:
+            continue
+        drop_module(model)
+        dropped.append(key)
+    if dropped:
+        available, total = host_memory_gb()
+        extra = f" (RAM {available:.1f}/{total:.1f} GiB free)" if total else ""
+        print(f"[TRELLIS.2] Freed models from RAM: {', '.join(dropped)}{extra}")
+    return dropped

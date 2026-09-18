@@ -45,6 +45,16 @@ class OffloadTests(unittest.TestCase):
         model = TinyDiT()
         self.assertGreater(offload.module_nbytes(model), 0)
 
+    def test_drop_models_removes_keys(self):
+        store = {"a": TinyDiT(), "b": TinyDiT()}
+        dropped = offload.drop_models(store, ["a", "missing"])
+        self.assertEqual(dropped, ["a"])
+        self.assertNotIn("a", store)
+        self.assertIn("b", store)
+
+    def test_recommend_pin_memory_default_off(self):
+        self.assertFalse(offload.recommend_pin_memory())
+
     def test_models_for_pipeline_type(self):
         names_512 = offload.models_for_pipeline_type("512")
         self.assertIn("shape_slat_flow_model_512", names_512)

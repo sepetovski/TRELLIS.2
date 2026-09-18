@@ -92,6 +92,10 @@ class Pipeline:
             block_offload=self._resolve_block_offload(),
         )
 
+    def drop_models(self, *keys: str) -> None:
+        """Remove finished submodels from RAM. Needed on WSL/4 GB boxes after each stage."""
+        offload.drop_models(self.models, keys)
+
     @contextmanager
     def _model_on_device(self, model):
         self._stage_model(model, True)
