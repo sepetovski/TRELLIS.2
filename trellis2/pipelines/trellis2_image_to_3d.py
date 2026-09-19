@@ -269,11 +269,17 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         decoder = self.models['sparse_structure_decoder']
         with self._model_on_device(decoder):
             decoded = decoder(z_s)>0
+        del z_s
         if resolution != decoded.shape[2]:
             ratio = decoded.shape[2] // resolution
             decoded = torch.nn.functional.max_pool3d(decoded.float(), ratio, ratio, 0) > 0.5
         coords = torch.argwhere(decoded)[:, [0, 2, 3, 4]].int()
-
+        del decoded
+        offload.release_cuda_memory()
+        print(
+            f"[TRELLIS.2] Sparse structure occupied voxels: {coords.shape[0]}  |  "
+            f"VRAM free {offload.gpu_free_memory_gb():.2f} GB"
+        )
         return coords
 
     def sample_shape_slat(
@@ -639,6 +645,14 @@ class Trellis2ImageTo3DPipeline(Pipeline):
             cond_512, ss_res,
             num_samples, sparse_structure_sampler_params
         )
+        lr_cap = offload.recommend_lr_tokens()
+        if lr_cap and coords.shape[0] > lr_cap:
+            print(
+                f"[TRELLIS.2] {coords.shape[0]} occupied voxels is too many for "
+                f"{gpu_gb:.1f} GB VRAM (a house photo is denser than T.png). "
+                f"Keeping {lr_cap} tokens. Override with TRELLIS_LR_TOKENS."
+            )
+            coords = offload.cap_sparse_coords(coords, lr_cap)
         if self.low_vram:
             self.drop_models("sparse_structure_flow_model", "sparse_structure_decoder")
         if pipeline_type == '512':

@@ -74,6 +74,7 @@ def main():
     pipeline.low_vram = True
     pipeline.block_offload = True
     pipeline.cuda()
+    offload.ensure_cuda_ready()
 
     image_path = sys.argv[1] if len(sys.argv) > 1 else IMAGE_PATH
     if not os.path.isfile(image_path):

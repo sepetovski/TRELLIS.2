@@ -1,3 +1,4 @@
+import os
 import unittest
 
 import torch
@@ -94,8 +95,34 @@ class OffloadTests(unittest.TestCase):
         self.assertFalse(offload.should_dit_block_offload(nested))
         self.assertFalse(offload.is_nested_block_model(TinyDiT()))
 
+    def test_recommend_lr_tokens_env(self):
+        old = os.environ.get("TRELLIS_LR_TOKENS")
+        os.environ["TRELLIS_LR_TOKENS"] = "1234"
+        try:
+            self.assertEqual(offload.recommend_lr_tokens(), 1234)
+        finally:
+            if old is None:
+                os.environ.pop("TRELLIS_LR_TOKENS", None)
+            else:
+                os.environ["TRELLIS_LR_TOKENS"] = old
+
     def test_recommend_pin_memory_default_off(self):
         self.assertFalse(offload.recommend_pin_memory())
+
+    def test_cap_sparse_coords_noop_when_under_budget(self):
+        coords = torch.tensor([[0, 1, 2, 3], [0, 1, 2, 4]])
+        out = offload.cap_sparse_coords(coords, 10)
+        self.assertTrue(torch.equal(out, coords))
+
+    def test_cap_sparse_coords_reduces_dense_volume(self):
+        xs = torch.arange(8)
+        grid = torch.stack(torch.meshgrid(xs, xs, xs, indexing="ij"), dim=-1).reshape(-1, 3)
+        coords = torch.cat([torch.zeros(grid.shape[0], 1, dtype=torch.long), grid], dim=1)
+        self.assertEqual(coords.shape[0], 512)
+        out = offload.cap_sparse_coords(coords, 64)
+        self.assertLessEqual(out.shape[0], 64)
+        self.assertGreater(out.shape[0], 8)
+        self.assertEqual(out.shape[1], 4)
 
     def test_models_for_pipeline_type(self):
         names_512 = offload.models_for_pipeline_type("512")

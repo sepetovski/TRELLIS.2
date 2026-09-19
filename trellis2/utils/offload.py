@@ -70,6 +70,102 @@ def recommend_pipeline_type(threshold_gb: float = 8.0) -> Optional[str]:
     return None
 
 
+def recommend_lr_tokens() -> Optional[int]:
+    """
+    Occupied-voxel cap for the 512 shape-SLat pass.
+
+    `T.png` is a sparse letter; a photo of a house fills most of the 32³
+    occupancy grid and the 4 GB card dies on the first shape-SLat step
+    (`device not ready` in attention RMSNorm). Override with TRELLIS_LR_TOKENS.
+    """
+    env = os.environ.get("TRELLIS_LR_TOKENS", "").strip()
+    if env:
+        return int(env)
+    total = gpu_total_memory_gb()
+    if total <= 0:
+        return None
+    if total < 6:
+        return 4096
+    if total < 8:
+        return 8192
+    return None
+
+
+def recommend_sequential_cfg() -> bool:
+    """Park the CFG positive prediction on CPU before the negative forward."""
+    env = os.environ.get("TRELLIS_SEQ_CFG", "").strip().lower()
+    if env in ("0", "false", "no"):
+        return False
+    if env in ("1", "true", "yes"):
+        return True
+    return recommend_block_offload()
+
+
+def cap_sparse_coords(coords: torch.Tensor, max_tokens: int) -> torch.Tensor:
+    """Keep at most `max_tokens` occupancy voxels while covering the same volume."""
+    if coords is None or max_tokens is None or coords.shape[0] <= max_tokens:
+        return coords
+    batch = coords[:, :1]
+    xyz = coords[:, 1:]
+    selected = coords
+    cell = 2
+    while selected.shape[0] > max_tokens and cell <= 32:
+        q = torch.cat([batch, xyz // cell], dim=1)
+        inverse = torch.unique(q, dim=0, return_inverse=True)[1]
+        order = torch.argsort(inverse, stable=True)
+        inv_sorted = inverse[order]
+        mask = torch.ones(inv_sorted.shape[0], dtype=torch.bool, device=coords.device)
+        mask[1:] = inv_sorted[1:] != inv_sorted[:-1]
+        selected = coords[order[mask].sort().values]
+        cell *= 2
+    if selected.shape[0] > max_tokens:
+        n = selected.shape[0]
+        idx = torch.linspace(0, n - 1, steps=max_tokens, device=selected.device)
+        idx = idx.round().long().unique()[:max_tokens]
+        selected = selected[idx]
+    return selected.contiguous()
+
+
+def park_activation(x):
+    """Move a sampler prediction to CPU so the next forward can reuse VRAM."""
+    if x is None:
+        return x
+    if hasattr(x, "cpu"):
+        return x.cpu()
+    return x
+
+
+def unpark_activation(x, like):
+    """Copy a parked prediction back to the device of `like`."""
+    if x is None:
+        return x
+    device = None
+    if torch.is_tensor(like):
+        device = like.device
+    elif hasattr(like, "feats") and torch.is_tensor(like.feats):
+        device = like.feats.device
+    elif hasattr(like, "device"):
+        device = like.device
+    if device is None or not hasattr(x, "to"):
+        return x
+    return x.to(device)
+
+
+def ensure_cuda_ready() -> None:
+    """Fail fast if a previous `device not ready` left the CUDA context dead."""
+    if not torch.cuda.is_available():
+        return
+    try:
+        torch.zeros(1, device="cuda")
+        torch.cuda.synchronize()
+    except Exception as exc:
+        raise RuntimeError(
+            "CUDA is dead (`device not ready`). A reboot is not enough if WSL "
+            "kept the GPU. In PowerShell run: wsl --shutdown\n"
+            "Then reopen Ubuntu and retry."
+        ) from exc
+
+
 def module_nbytes(module: nn.Module) -> int:
     total = 0
     for p in module.parameters():
