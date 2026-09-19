@@ -107,6 +107,10 @@ class Pipeline:
         """Remove finished submodels from RAM. Needed on WSL/4 GB boxes after each stage."""
         offload.drop_models(self.models, keys)
 
+    def unload_models(self, *keys: str) -> None:
+        """Park finished submodels out of RAM but keep their load specs for later stages."""
+        offload.unload_models(self.models, keys)
+
     @contextmanager
     def _model_on_device(self, model):
         self._stage_model(model, True)

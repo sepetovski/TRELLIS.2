@@ -63,6 +63,23 @@ class OffloadTests(unittest.TestCase):
         store.pop("a")
         self.assertNotIn("a", store)
 
+    def test_lazy_model_map_unload_keeps_spec(self):
+        loads = []
+
+        def load_fn(name, spec):
+            loads.append(name)
+            return TinyDiT()
+
+        store = offload.LazyModelMap(load_fn, {"dec": "spec-dec"})
+        first = store["dec"]
+        self.assertEqual(loads, ["dec"])
+        unloaded = offload.unload_models(store, ["dec"])
+        self.assertEqual(unloaded, ["dec"])
+        self.assertIn("dec", store)
+        second = store["dec"]
+        self.assertIsNot(first, second)
+        self.assertEqual(loads, ["dec", "dec"])
+
     def test_drop_models_removes_keys(self):
         store = {"a": TinyDiT(), "b": TinyDiT()}
         dropped = offload.drop_models(store, ["a", "missing"])
@@ -87,6 +104,9 @@ class OffloadTests(unittest.TestCase):
         names_cascade = offload.models_for_pipeline_type("1024_cascade")
         self.assertIn("shape_slat_flow_model_1024", names_cascade)
         self.assertIn("shape_slat_flow_model_512", names_cascade)
+        names_1536 = offload.models_for_pipeline_type("1536_cascade")
+        self.assertEqual(names_1536, names_cascade)
+        self.assertNotIn("tex_slat_flow_model_512", names_1536)
 
     def test_block_offload_cpu_forward_matches(self):
         torch.manual_seed(0)

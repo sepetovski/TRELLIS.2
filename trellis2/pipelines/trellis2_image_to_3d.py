@@ -313,6 +313,11 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         
         return slat
     
+    def _resolve_flow_model(self, flow_model):
+        if isinstance(flow_model, str):
+            return self.models[flow_model]
+        return flow_model
+
     def sample_shape_slat_cascade(
         self,
         lr_cond: dict,
@@ -328,12 +333,15 @@ class Trellis2ImageTo3DPipeline(Pipeline):
     ) -> SparseTensor:
         """
         Sample structured latent with the given conditioning.
-        
-        Args:
-            cond (dict): The conditioning information.
-            coords (torch.Tensor): The coordinates of the sparse structure.
-            sampler_params (dict): Additional parameters for the sampler.
+
+        `flow_model_lr` / `flow_model` may be nn.Modules or LazyModelMap keys.
+        Pass keys on low-VRAM so the 1024 DiT is not loaded until the 512 DiT
+        has been dropped.
         """
+        lr_key = flow_model_lr if isinstance(flow_model_lr, str) else None
+        hr_key = flow_model if isinstance(flow_model, str) else None
+        flow_model_lr = self._resolve_flow_model(flow_model_lr)
+
         # LR
         noise = SparseTensor(
             feats=torch.randn(coords.shape[0], flow_model_lr.in_channels).to(self.device),
@@ -347,20 +355,27 @@ class Trellis2ImageTo3DPipeline(Pipeline):
                 **lr_cond,
                 **sampler_params,
                 verbose=True,
-                tqdm_desc="Sampling shape SLat",
+                tqdm_desc="Sampling shape SLat (low-res)",
             ).samples
         std = torch.tensor(self.shape_slat_normalization['std'])[None].to(slat.device)
         mean = torch.tensor(self.shape_slat_normalization['mean'])[None].to(slat.device)
         slat = slat * std + mean
-        
+        if self.low_vram and lr_key is not None:
+            self.drop_models(lr_key)
+            offload.log_host_memory("after LR shape SLat")
+
         # Upsample
         decoder = self.models['shape_slat_decoder']
         with self._model_on_device(decoder):
             decoder.low_vram = True
             hr_coords = decoder.upsample(slat, upsample_times=4)
-            decoder.low_vram = False
+            decoder.low_vram = bool(self.low_vram)
         del slat
         offload.release_cuda_memory()
+        if self.low_vram:
+            # Decoder is needed again at mesh decode; unload (do not drop) so
+            # the 1024 DiT does not share WSL RAM with the VAE.
+            self.unload_models("shape_slat_decoder")
         hr_resolution = resolution
         while True:
             quant_coords = torch.cat([
@@ -371,10 +386,20 @@ class Trellis2ImageTo3DPipeline(Pipeline):
             num_tokens = coords.shape[0]
             if num_tokens <= max_num_tokens or hr_resolution <= min_hr_resolution:
                 if hr_resolution != resolution:
-                    print(f"Due to the limited number of tokens, the resolution is reduced to {hr_resolution}.")
+                    print(
+                        f"[TRELLIS.2] Token budget {max_num_tokens} cannot hold "
+                        f"{resolution}³; using {hr_resolution}³ ({num_tokens} tokens, "
+                        f"floor {min_hr_resolution})."
+                    )
+                else:
+                    print(
+                        f"[TRELLIS.2] Cascade HR {hr_resolution}³ with {num_tokens} tokens "
+                        f"(budget {max_num_tokens})."
+                    )
                 break
             hr_resolution -= 128
-        
+
+        flow_model = self._resolve_flow_model(flow_model if hr_key is None else hr_key)
         # Sample structured latent
         noise = SparseTensor(
             feats=torch.randn(coords.shape[0], flow_model.in_channels).to(self.device),
@@ -388,7 +413,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
                 **cond,
                 **sampler_params,
                 verbose=True,
-                tqdm_desc="Sampling shape SLat",
+                tqdm_desc=f"Sampling shape SLat ({hr_resolution})",
             ).samples
 
         std = torch.tensor(self.shape_slat_normalization['std'])[None].to(slat.device)
@@ -568,7 +593,14 @@ class Trellis2ImageTo3DPipeline(Pipeline):
                 pipeline_type = '512'
         if min_hr_resolution is None:
             min_hr_resolution = 512 if gpu_gb and gpu_gb < 8 else 1024
-        if gpu_gb and gpu_gb < 8 and max_num_tokens > 8192:
+        # Only auto-cap tokens on the default 512 path. Explicit 1024/1536
+        # cascades pass their own budget.
+        if (
+            requested_type is None
+            and gpu_gb
+            and gpu_gb < 8
+            and max_num_tokens > 8192
+        ):
             max_num_tokens = 8192
             print(f"[TRELLIS.2] Capping max_num_tokens to {max_num_tokens} for <8 GB VRAM.")
         # Check pipeline type
@@ -640,7 +672,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         elif pipeline_type == '1024_cascade':
             shape_slat, res = self.sample_shape_slat_cascade(
                 cond_512, cond_1024,
-                self.models['shape_slat_flow_model_512'], self.models['shape_slat_flow_model_1024'],
+                'shape_slat_flow_model_512', 'shape_slat_flow_model_1024',
                 512, 1024,
                 coords, shape_slat_sampler_params,
                 max_num_tokens,
@@ -657,7 +689,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         elif pipeline_type == '1536_cascade':
             shape_slat, res = self.sample_shape_slat_cascade(
                 cond_512, cond_1024,
-                self.models['shape_slat_flow_model_512'], self.models['shape_slat_flow_model_1024'],
+                'shape_slat_flow_model_512', 'shape_slat_flow_model_1024',
                 512, 1536,
                 coords, shape_slat_sampler_params,
                 max_num_tokens,

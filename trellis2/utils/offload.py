@@ -401,6 +401,35 @@ class LazyModelMap(dict):
             return super().pop(key)
         return default
 
+    def unload(self, key) -> bool:
+        """Drop a loaded instance but keep the spec so it can be loaded again."""
+        if super().__contains__(key):
+            model = super().pop(key)
+            drop_module(model)
+            return True
+        return False
+
+
+def unload_models(store: dict, keys: Iterable[str]) -> List[str]:
+    """Free RAM for models that will be needed again later (keeps checkpoint specs)."""
+    unloaded = []
+    for key in keys:
+        if isinstance(store, LazyModelMap):
+            if store.unload(key):
+                unloaded.append(key)
+            continue
+        model = store.get(key)
+        if model is None:
+            continue
+        drop_module(model)
+        store[key] = None
+        unloaded.append(key)
+    if unloaded:
+        available, total = host_memory_gb()
+        extra = f" (RAM {available:.1f}/{total:.1f} GiB free)" if total else ""
+        print(f"[TRELLIS.2] Unloaded (reloadable): {', '.join(unloaded)}{extra}")
+    return unloaded
+
 
 def drop_models(store: dict, keys: Iterable[str]) -> List[str]:
     """Delete named entries from a pipeline model dict and free host memory."""

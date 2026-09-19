@@ -210,6 +210,16 @@ WSL notes:
 - After a `device not ready` fault, restart the WSL session (or reboot) before the next run; the CUDA context stays dead until then.
 - A bare `Killed` (no Python traceback) is the **Linux OOM killer** — WSL ran out of *system RAM*, not VRAM. Each unused 1.3B DiT is now deleted after its stage. If it still dies, give WSL more RAM in `%UserProfile%\\.wslconfig` (`memory=16GB`, `swap=8GB`) and run `wsl --shutdown`.
 
+#### Experimental 1536³ cascade (`example_1536.py`)
+
+`example_low_vram.py` stays on the proven 512³ path. To *try* higher resolution on the same 4 GB card, use a separate script:
+
+```sh
+python example_1536.py yourphoto.png
+```
+
+This requests `pipeline_type='1536_cascade'` (512 shape SLat, then the 1024 DiT aimed at 1536). Full 1536³ still needs ~49k sparse tokens, which does not fit 4 GB. The script caps tokens (default `TRELLIS_MAX_TOKENS=12288`) and will not go below `TRELLIS_MIN_HR=1024`, so the result is 1024–1536, never a silent 512 fall-back. If the second shape-SLat bar dies with `device not ready`, run `wsl --shutdown` and retry with `TRELLIS_MAX_TOKENS=8192`.
+
 #### Web Demo
 
 [app.py](app.py) provides a simple web demo for image to 3D asset generation. you can run the demo with the following command:
