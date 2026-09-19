@@ -15,8 +15,6 @@ class ClassifierFreeGuidanceSamplerMixin:
             return super()._inference_model(model, x_t, t, neg_cond, **kwargs)
         else:
             pred_pos = super()._inference_model(model, x_t, t, cond, **kwargs)
-            # Two CFG forwards on a dense occupancy grid (a house photo, not T.png)
-            # will TDR a 4 GB card if the positive output stays in VRAM.
             if offload.recommend_sequential_cfg():
                 parked = offload.park_activation(pred_pos)
                 del pred_pos

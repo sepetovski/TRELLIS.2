@@ -92,13 +92,14 @@ def recommend_lr_tokens() -> Optional[int]:
 
 
 def recommend_sequential_cfg() -> bool:
-    """Park the CFG positive prediction on CPU before the negative forward."""
+    """Park the CFG positive prediction on CPU before the negative forward.
+
+    Off by default. Token capping is what keeps 4 GB sampling alive; the extra
+    synchronize on every step made DiT sampling several times slower.
+    Enable with TRELLIS_SEQ_CFG=1 if a dense occupancy still TDRs.
+    """
     env = os.environ.get("TRELLIS_SEQ_CFG", "").strip().lower()
-    if env in ("0", "false", "no"):
-        return False
-    if env in ("1", "true", "yes"):
-        return True
-    return recommend_block_offload()
+    return env in ("1", "true", "yes")
 
 
 def cap_sparse_coords(coords: torch.Tensor, max_tokens: int) -> torch.Tensor:

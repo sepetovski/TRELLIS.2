@@ -106,6 +106,17 @@ class OffloadTests(unittest.TestCase):
             else:
                 os.environ["TRELLIS_LR_TOKENS"] = old
 
+    def test_recommend_sequential_cfg_default_off(self):
+        old = os.environ.get("TRELLIS_SEQ_CFG")
+        os.environ.pop("TRELLIS_SEQ_CFG", None)
+        try:
+            self.assertFalse(offload.recommend_sequential_cfg())
+        finally:
+            if old is None:
+                os.environ.pop("TRELLIS_SEQ_CFG", None)
+            else:
+                os.environ["TRELLIS_SEQ_CFG"] = old
+
     def test_recommend_pin_memory_default_off(self):
         self.assertFalse(offload.recommend_pin_memory())
 

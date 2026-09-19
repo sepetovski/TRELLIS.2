@@ -6,7 +6,6 @@ from easydict import EasyDict as edict
 from .base import Sampler
 from .classifier_free_guidance_mixin import ClassifierFreeGuidanceSamplerMixin
 from .guidance_interval_mixin import GuidanceIntervalSamplerMixin
-from ...utils import offload
 
 
 class FlowEulerSampler(Sampler):
@@ -138,8 +137,6 @@ class FlowEulerSampler(Sampler):
             if store_intermediates:
                 ret.pred_x_t.append(out.pred_x_prev)
                 ret.pred_x_0.append(out.pred_x_0)
-            elif offload.recommend_sequential_cfg():
-                offload.release_cuda_memory()
         ret.samples = sample
         return ret
 

@@ -44,6 +44,8 @@ Usage (WSL, after `conda activate trellis2`):
     git checkout cursor/low-vram-block-offload-3548
     python example_low_vram.py
 
+The GLB is named after the image (`house.png` → `house.glb`).
+
 Optional live VRAM log:
     TRELLIS_VRAM_LOG=1 python example_low_vram.py
 """
@@ -112,14 +114,18 @@ def main():
     mesh.simplify(16777216)
     offload.release_cuda_memory()
 
+    stem = os.path.splitext(os.path.basename(image_path))[0]
+    mp4_name = f"{stem}.mp4"
+    glb_name = f"{stem}.glb"
+
     try:
         envmap = EnvMap(torch.tensor(
             cv2.cvtColor(cv2.imread("assets/hdri/forest.exr", cv2.IMREAD_UNCHANGED), cv2.COLOR_BGR2RGB),
             dtype=torch.float32, device="cuda",
         ))
         video = render_utils.make_pbr_vis_frames(render_utils.render_video(mesh, envmap=envmap))
-        imageio.mimsave("sample.mp4", video, fps=15)
-        print("Wrote sample.mp4")
+        imageio.mimsave(mp4_name, video, fps=15)
+        print(f"Wrote {mp4_name}")
     except Exception as e:
         print(f"Video render skipped ({e})")
 
@@ -138,8 +144,8 @@ def main():
         remesh_project=0,
         verbose=True,
     )
-    glb.export("sample.glb", extension_webp=True)
-    print("Wrote sample.glb")
+    glb.export(glb_name, extension_webp=True)
+    print(f"Wrote {glb_name}")
 
 
 if __name__ == "__main__":

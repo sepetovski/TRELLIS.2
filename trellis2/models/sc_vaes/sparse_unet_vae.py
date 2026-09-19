@@ -476,17 +476,28 @@ class SparseUnetVaeDecoder(nn.Module):
         self.apply(_basic_init)
 
     def _run_decoder_stage(self, i, res, h, guide_subs, subs_gt, subs):
+        device = h.device
         for j, block in enumerate(res):
+            if self.low_vram:
+                block.to(device)
             if i < len(self.blocks) - 1 and j == len(res) - 1:
                 if self.pred_subdiv:
                     if self.training:
                         subs_gt.append(h.get_spatial_cache('subdivision'))
                     h, sub = block(h)
+                    if self.low_vram and hasattr(sub, "clear_spatial_cache"):
+                        sub.clear_spatial_cache()
                     subs.append(sub)
                 else:
                     h = block(h, subdiv=guide_subs[i] if guide_subs is not None else None)
             else:
                 h = block(h)
+            if self.low_vram:
+                block.cpu()
+                # Later levels have many more voxels; free the just-finished block
+                # before the upsample conv builds a giant neighbor map.
+                if i >= 2 and torch.cuda.is_available():
+                    torch.cuda.empty_cache()
         return h
 
     def forward(self, x: sp.SparseTensor, guide_subs: Optional[List[sp.SparseTensor]] = None, return_subs: bool = False) -> sp.SparseTensor:
@@ -504,11 +515,12 @@ class SparseUnetVaeDecoder(nn.Module):
         subs = []
         for i, res in enumerate(self.blocks):
             if self.low_vram:
-                print(f"[TRELLIS.2] VAE decode level {i + 1}/{len(self.blocks)}")
-                res.to(device)
+                n_vox = int(h.coords.shape[0]) if hasattr(h, "coords") else -1
+                print(f"[TRELLIS.2] VAE decode level {i + 1}/{len(self.blocks)} ({n_vox} voxels)")
             h = self._run_decoder_stage(i, res, h, guide_subs, subs_gt, subs)
             if self.low_vram:
-                res.cpu()
+                if hasattr(h, "clear_spatial_cache"):
+                    h.clear_spatial_cache()
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
         h = h.type(x.dtype)
@@ -539,15 +551,19 @@ class SparseUnetVaeDecoder(nn.Module):
         for i, res in enumerate(self.blocks):
             if i == upsample_times:
                 return h.coords
-            if self.low_vram:
-                res.to(device)
             for j, block in enumerate(res):
+                if self.low_vram:
+                    block.to(device)
                 if i < len(self.blocks) - 1 and j == len(res) - 1:
                     h, sub = block(h)
+                    del sub
                 else:
                     h = block(h)
+                if self.low_vram:
+                    block.cpu()
             if self.low_vram:
-                res.cpu()
+                if hasattr(h, "clear_spatial_cache"):
+                    h.clear_spatial_cache()
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
        
