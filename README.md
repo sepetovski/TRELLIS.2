@@ -57,7 +57,7 @@ Data processing is streamlined for instant conversions that are fully **renderin
 
 ### Prerequisites
 - **System**: The code is currently tested only on **Linux**.
-- **Hardware**: An NVIDIA GPU with at least 24GB of memory is necessary. The code has been verified on NVIDIA A100 and H100 GPUs.  
+- **Hardware**: An NVIDIA GPU with at least 24GB of memory is necessary for the default 1024³ cascade. The code has been verified on NVIDIA A100 and H100 GPUs. GPUs with 4–12 GB can run the 512³ pipeline using sequential CPU offload (see [Low-VRAM / 4 GB GPUs](#low-vram--4-gb-gpus)).  
 - **Software**:   
   - The [CUDA Toolkit](https://developer.nvidia.com/cuda-toolkit-archive) is needed to compile certain packages. Recommended version is 12.4.  
   - [Conda](https://docs.anaconda.com/miniconda/install/#quick-command-line-install) is recommended for managing dependencies.  
@@ -172,6 +172,55 @@ Upon execution, the script generates the following files:
  - `sample.glb`: The extracted PBR-ready 3D asset in GLB format.
 
 **Note:** The `.glb` file is exported in `OPAQUE` mode by default. Although the alpha channel is preserved within the texture map, it is not active initially. To enable transparency, import the asset into your 3D software and manually connect the texture's alpha channel to the material's opacity or alpha input.
+
+`example.py` auto-detects GPUs under 8 GB and loads only the 512³ checkpoints with block-level CPU offload. On a 4 GB card (for example an RTX 3050 laptop in WSL) you can also run:
+
+```sh
+python example_low_vram.py
+```
+
+The GLB is named after the input image (`house.png` → `house.glb`).
+
+### Low-VRAM / 4 GB GPUs
+
+TRELLIS.2 is a **cascade of independently trained modules** (sparse-structure DiT, 512 shape SLat, 1024 shape SLat, texture SLat, VAEs), not one 4B forward. `low_vram=True` already keeps idle modules on CPU. That is enough to finish the sparse-structure pass and the 512 shape-SLat pass on a 4 GB card. It is **not** enough for the 1024 shape-SLat pass: one 1.3B bf16 DiT is ~2.6 GB of weights, and the MLP GELU activations at high token counts fill the rest of the 4096 MiB. `nvidia-smi` then sits at ~3640/4096 MiB with 100% util, steps jump from ~2 s/it to ~15 s/it, and the driver reports `CUDA driver error: device not ready`. Raising Windows `TdrDelay` does not fix that — it is a memory-limit fault, not a timeout.
+
+This repo now:
+
+1. **Streams transformer blocks CPU ↔ GPU one layer at a time** on GPUs ≤12 GB (`block_offload='auto'`).
+2. **Defaults `pipeline.run()` to `pipeline_type='512'`** on GPUs under 8 GB so the 1024 cascade is not used unless you pass it explicitly.
+3. **Skips loading unused 1024 checkpoints** when you pass `pipeline_type='512'` to `from_pretrained`.
+
+```python
+from trellis2.pipelines import Trellis2ImageTo3DPipeline
+
+pipeline = Trellis2ImageTo3DPipeline.from_pretrained(
+    "microsoft/TRELLIS.2-4B",
+    pipeline_type="512",
+)
+pipeline.low_vram = True
+pipeline.block_offload = True   # optional; auto-enabled on ≤12 GB
+pipeline.cuda()
+mesh = pipeline.run(image, pipeline_type="512")[0]
+```
+
+WSL notes:
+
+- Close other GPU apps. Windows + WDDM already reserve a few hundred MiB (a 4096 MiB laptop GPU often shows ~3640 MiB usable).
+- `TdrDelay=60` in the Windows registry is still useful so a long kernel is not killed, but it will not create extra VRAM.
+- Live tracing: `TRELLIS_VRAM_LOG=1 python example_low_vram.py` and `watch -n 0.5 nvidia-smi`.
+- After a `device not ready` fault, CUDA stays dead until WSL is reset. A Windows reboot is not always enough. In PowerShell run `wsl --shutdown`, then reopen Ubuntu. A photo (house, person, car) occupies far more voxels than `T.png`; the 512 path now prints `Sparse structure occupied voxels` and caps them on GPUs under 6 GB (default 4096, override with `TRELLIS_LR_TOKENS`).
+- A bare `Killed` (no Python traceback) is the **Linux OOM killer** — WSL ran out of *system RAM*, not VRAM. Each unused 1.3B DiT is now deleted after its stage. If it still dies, give WSL more RAM in `%UserProfile%\\.wslconfig` (`memory=16GB`, `swap=8GB`) and run `wsl --shutdown`.
+
+#### Experimental 1536³ cascade (`example_1536.py`)
+
+`example_low_vram.py` stays on the proven 512³ path. To *try* higher resolution on the same 4 GB card, use a separate script:
+
+```sh
+python example_1536.py yourphoto.png
+```
+
+This requests `pipeline_type='1536_cascade'` (512 shape SLat, then the 1024 DiT aimed at 1536). Full 1536³ still needs ~49k sparse tokens, which does not fit 4 GB. The script caps tokens (default `TRELLIS_MAX_TOKENS=12288`) and will not go below `TRELLIS_MIN_HR=1024`, so the result is 1024–1536, never a silent 512 fall-back. If the second shape-SLat bar dies with `device not ready`, run `wsl --shutdown` and retry with `TRELLIS_MAX_TOKENS=8192`.
 
 #### Web Demo
 

@@ -58,6 +58,7 @@ class FlowEulerSampler(Sampler):
         t: float,
         t_prev: float,
         cond: Optional[Any] = None,
+        store_intermediates: bool = False,
         **kwargs
     ):
         """
@@ -69,16 +70,21 @@ class FlowEulerSampler(Sampler):
             t: The current timestep.
             t_prev: The previous timestep.
             cond: conditional information.
+            store_intermediates: If True, also compute and return pred_x_0.
             **kwargs: Additional arguments for model inference.
 
         Returns:
             a dict containing the following
             - 'pred_x_prev': x_{t-1}.
-            - 'pred_x_0': a prediction of x_0.
+            - 'pred_x_0': a prediction of x_0 (only if store_intermediates).
         """
-        pred_x_0, pred_eps, pred_v = self._get_model_prediction(model, x_t, t, cond, **kwargs)
+        pred_v = self._inference_model(model, x_t, t, cond, **kwargs)
         pred_x_prev = x_t - (t - t_prev) * pred_v
-        return edict({"pred_x_prev": pred_x_prev, "pred_x_0": pred_x_0})
+        ret = edict({"pred_x_prev": pred_x_prev})
+        if store_intermediates:
+            pred_x_0, _pred_eps = self._v_to_xstart_eps(x_t=x_t, t=t, v=pred_v)
+            ret.pred_x_0 = pred_x_0
+        return ret
 
     @torch.no_grad()
     def sample(
@@ -90,6 +96,7 @@ class FlowEulerSampler(Sampler):
         rescale_t: float = 1.0,
         verbose: bool = True,
         tqdm_desc: str = "Sampling",
+        store_intermediates: bool = False,
         **kwargs
     ):
         """
@@ -103,6 +110,9 @@ class FlowEulerSampler(Sampler):
             rescale_t: The rescale factor for t.
             verbose: If True, show a progress bar.
             tqdm_desc: A customized tqdm desc.
+            store_intermediates: If True, keep pred_x_t / pred_x_0 for every step
+                on device. Off by default — those tensors are unused by the
+                pipeline and accumulate VRAM across steps.
             **kwargs: Additional arguments for model_inference.
 
         Returns:
@@ -118,10 +128,15 @@ class FlowEulerSampler(Sampler):
         t_pairs = list((t_seq[i], t_seq[i + 1]) for i in range(steps))
         ret = edict({"samples": None, "pred_x_t": [], "pred_x_0": []})
         for t, t_prev in tqdm(t_pairs, desc=tqdm_desc, disable=not verbose):
-            out = self.sample_once(model, sample, t, t_prev, cond, **kwargs)
+            out = self.sample_once(
+                model, sample, t, t_prev, cond,
+                store_intermediates=store_intermediates,
+                **kwargs,
+            )
             sample = out.pred_x_prev
-            ret.pred_x_t.append(out.pred_x_prev)
-            ret.pred_x_0.append(out.pred_x_0)
+            if store_intermediates:
+                ret.pred_x_t.append(out.pred_x_prev)
+                ret.pred_x_0.append(out.pred_x_0)
         ret.samples = sample
         return ret
 

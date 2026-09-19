@@ -46,6 +46,7 @@ class Trellis2TexturingPipeline(Pipeline):
         image_cond_model: Callable = None,
         rembg_model: Callable = None,
         low_vram: bool = True,
+        block_offload: Union[bool, str] = "auto",
     ):
         if models is None:
             return
@@ -57,6 +58,7 @@ class Trellis2TexturingPipeline(Pipeline):
         self.image_cond_model = image_cond_model
         self.rembg_model = rembg_model
         self.low_vram = low_vram
+        self.block_offload = block_offload
         self.pbr_attr_layout = {
             'base_color': slice(0, 3),
             'metallic': slice(3, 4),
@@ -86,6 +88,7 @@ class Trellis2TexturingPipeline(Pipeline):
         pipeline.rembg_model = getattr(rembg, args['rembg_model']['name'])(**args['rembg_model']['args'])
 
         pipeline.low_vram = args.get('low_vram', True)
+        pipeline.block_offload = args.get('block_offload', 'auto')
         pipeline.pbr_attr_layout = {
             'base_color': slice(0, 3),
             'metallic': slice(3, 4),
@@ -97,6 +100,7 @@ class Trellis2TexturingPipeline(Pipeline):
 
     def to(self, device: torch.device) -> None:
         self._device = device
+        self._resolve_block_offload()
         if not self.low_vram:
             super().to(device)
             self.image_cond_model.to(device)
@@ -137,11 +141,8 @@ class Trellis2TexturingPipeline(Pipeline):
             output = input
         else:
             input = input.convert('RGB')
-            if self.low_vram:
-                self.rembg_model.to(self.device)
-            output = self.rembg_model(input)
-            if self.low_vram:
-                self.rembg_model.cpu()
+            with self._model_on_device(self.rembg_model):
+                output = self.rembg_model(input)
         output_np = np.array(output)
         alpha = output_np[:, :, 3]
         bbox = np.argwhere(alpha > 0.8 * 255)
@@ -167,11 +168,8 @@ class Trellis2TexturingPipeline(Pipeline):
             dict: The conditioning information
         """
         self.image_cond_model.image_size = resolution
-        if self.low_vram:
-            self.image_cond_model.to(self.device)
-        cond = self.image_cond_model(image)
-        if self.low_vram:
-            self.image_cond_model.cpu()
+        with self._model_on_device(self.image_cond_model):
+            cond = self.image_cond_model(image)
         if not include_neg_cond:
             return {'cond': cond}
         neg_cond = torch.zeros_like(cond)
@@ -215,10 +213,10 @@ class Trellis2TexturingPipeline(Pipeline):
         intersected = vertices.replace(intersected).to(self.device)
             
         if self.low_vram:
-            self.models['shape_slat_encoder'].to(self.device)
-        shape_slat = self.models['shape_slat_encoder'](vertices, intersected)
-        if self.low_vram:
-            self.models['shape_slat_encoder'].cpu()
+            with self._model_on_device(self.models['shape_slat_encoder']):
+                shape_slat = self.models['shape_slat_encoder'](vertices, intersected)
+        else:
+            shape_slat = self.models['shape_slat_encoder'](vertices, intersected)
         return shape_slat
 
     def sample_tex_slat(
@@ -244,19 +242,16 @@ class Trellis2TexturingPipeline(Pipeline):
         in_channels = flow_model.in_channels if isinstance(flow_model, nn.Module) else flow_model[0].in_channels
         noise = shape_slat.replace(feats=torch.randn(shape_slat.coords.shape[0], in_channels - shape_slat.feats.shape[1]).to(self.device))
         sampler_params = {**self.tex_slat_sampler_params, **sampler_params}
-        if self.low_vram:
-            flow_model.to(self.device)
-        slat = self.tex_slat_sampler.sample(
-            flow_model,
-            noise,
-            concat_cond=shape_slat,
-            **cond,
-            **sampler_params,
-            verbose=True,
-            tqdm_desc="Sampling texture SLat",
-        ).samples
-        if self.low_vram:
-            flow_model.cpu()
+        with self._model_on_device(flow_model):
+            slat = self.tex_slat_sampler.sample(
+                flow_model,
+                noise,
+                concat_cond=shape_slat,
+                **cond,
+                **sampler_params,
+                verbose=True,
+                tqdm_desc="Sampling texture SLat",
+            ).samples
 
         std = torch.tensor(self.tex_slat_normalization['std'])[None].to(slat.device)
         mean = torch.tensor(self.tex_slat_normalization['mean'])[None].to(slat.device)
@@ -277,11 +272,8 @@ class Trellis2TexturingPipeline(Pipeline):
         Returns:
             SparseTensor: The decoded texture voxels
         """
-        if self.low_vram:
-            self.models['tex_slat_decoder'].to(self.device)
-        ret = self.models['tex_slat_decoder'](slat) * 0.5 + 0.5
-        if self.low_vram:
-            self.models['tex_slat_decoder'].cpu()
+        with self._model_on_device(self.models['tex_slat_decoder']):
+            ret = self.models['tex_slat_decoder'](slat) * 0.5 + 0.5
         return ret
     
     def postprocess_mesh(

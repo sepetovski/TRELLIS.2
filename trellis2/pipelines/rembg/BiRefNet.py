@@ -30,7 +30,11 @@ class BiRefNet:
         
     def __call__(self, image: Image.Image) -> Image.Image:
         image_size = image.size
-        input_images = self.transform_image(image).unsqueeze(0).to("cuda")
+        try:
+            device = next(self.model.parameters()).device
+        except StopIteration:
+            device = torch.device("cpu")
+        input_images = self.transform_image(image).unsqueeze(0).to(device)
         # Prediction
         with torch.no_grad():
             preds = self.model(input_images)[-1].sigmoid().cpu()
