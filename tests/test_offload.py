@@ -135,6 +135,25 @@ class OffloadTests(unittest.TestCase):
         self.assertGreater(out.shape[0], 8)
         self.assertEqual(out.shape[1], 4)
 
+    def test_scale_coords_upsample(self):
+        coords = torch.tensor([[0, 1, 2, 3], [0, 4, 5, 6]])
+        out = offload.scale_coords_upsample(coords, 4)
+        self.assertTrue(torch.equal(out[:, 0], coords[:, 0]))
+        self.assertTrue(torch.equal(out[:, 1:], coords[:, 1:] * 16))
+
+    def test_recommend_upsample_voxels_env(self):
+        old = os.environ.get("TRELLIS_UPSAMPLE_VOXELS")
+        try:
+            os.environ["TRELLIS_UPSAMPLE_VOXELS"] = "0"
+            self.assertEqual(offload.recommend_upsample_voxels(), 0)
+            os.environ["TRELLIS_UPSAMPLE_VOXELS"] = "full"
+            self.assertIsNone(offload.recommend_upsample_voxels())
+        finally:
+            if old is None:
+                os.environ.pop("TRELLIS_UPSAMPLE_VOXELS", None)
+            else:
+                os.environ["TRELLIS_UPSAMPLE_VOXELS"] = old
+
     def test_models_for_pipeline_type(self):
         names_512 = offload.models_for_pipeline_type("512")
         self.assertIn("shape_slat_flow_model_512", names_512)

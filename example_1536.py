@@ -10,9 +10,10 @@ token count is too high, TRELLIS.2 lowers resolution 128 at a time until
 it fits `max_num_tokens`, but not below `min_hr_resolution` (default 1024).
 
 So you may get 1536, 1408, …, or 1024 — not a silent fall-back to 512.
-If you see `device not ready` on "Sampling shape SLat (…)", the 1024 DiT
-still overflowed. Lower tokens and retry after `wsl --shutdown`:
+On 4 GB the 4-level VAE coord upsample is skipped (it TDRs); occupancy is
+integer-scaled and the 1024 DiT still runs. After `device not ready`:
 
+    wsl --shutdown
     TRELLIS_MAX_TOKENS=8192 python example_1536.py photo.png
 
 Keep using example_low_vram.py when you want the proven 512³ path.

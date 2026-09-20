@@ -370,18 +370,33 @@ class Trellis2ImageTo3DPipeline(Pipeline):
             self.drop_models(lr_key)
             offload.log_host_memory("after LR shape SLat")
 
-        # Upsample
-        decoder = self.models['shape_slat_decoder']
-        with self._model_on_device(decoder):
-            decoder.low_vram = True
-            hr_coords = decoder.upsample(slat, upsample_times=4)
-            decoder.low_vram = bool(self.low_vram)
-        del slat
-        offload.release_cuda_memory()
-        if self.low_vram:
-            # Decoder is needed again at mesh decode; unload (do not drop) so
-            # the 1024 DiT does not share WSL RAM with the VAE.
-            self.unload_models("shape_slat_decoder")
+        # Upsample occupancy to the HR token grid. On 4 GB the 4-level VAE C2S
+        # (decoder.upsample) TDRs; integer-scale the LR occupancy instead.
+        upsample_times = 4
+        max_voxels = offload.recommend_upsample_voxels() if self.low_vram else None
+        if max_voxels == 0:
+            hr_coords = offload.scale_coords_upsample(slat.coords, upsample_times)
+            print(
+                f"[TRELLIS.2] Skipping VAE cascade upsample on this GPU "
+                f"({int(hr_coords.shape[0])} voxels ×{2 ** upsample_times}). "
+                "The 1024 DiT still runs. Set TRELLIS_UPSAMPLE_VOXELS=full to force C2S."
+            )
+            del slat
+            offload.release_cuda_memory()
+        else:
+            decoder = self.models['shape_slat_decoder']
+            with self._model_on_device(decoder):
+                decoder.low_vram = True
+                hr_coords = decoder.upsample(
+                    slat, upsample_times=upsample_times, max_voxels=max_voxels
+                )
+                decoder.low_vram = bool(self.low_vram)
+            del slat
+            offload.release_cuda_memory()
+            if self.low_vram:
+                # Decoder is needed again at mesh decode; unload (do not drop) so
+                # the 1024 DiT does not share WSL RAM with the VAE.
+                self.unload_models("shape_slat_decoder")
         hr_resolution = resolution
         while True:
             quant_coords = torch.cat([

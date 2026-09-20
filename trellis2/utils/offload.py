@@ -102,6 +102,35 @@ def recommend_sequential_cfg() -> bool:
     return env in ("1", "true", "yes")
 
 
+def recommend_upsample_voxels() -> Optional[int]:
+    """
+    Max voxels allowed during cascade VAE C2S upsample.
+
+    0 means skip the 4-level VAE upsample and integer-scale LR occupancy
+    (required on 4 GB — that C2S is what TDRs dragon.png after the 512 pass).
+    None means run the full VAE upsample. Override with TRELLIS_UPSAMPLE_VOXELS
+    (`0`, a count, or `full`).
+    """
+    env = os.environ.get("TRELLIS_UPSAMPLE_VOXELS", "").strip().lower()
+    if env in ("full", "off", "none"):
+        return None
+    if env:
+        return int(env)
+    total = gpu_total_memory_gb()
+    if total > 0 and total < 8:
+        return 0
+    return None
+
+
+def scale_coords_upsample(coords: torch.Tensor, upsample_times: int) -> torch.Tensor:
+    """Integer-scale occupancy coords as if `upsample_times` 2× VAE C2S ran."""
+    if coords is None or upsample_times <= 0:
+        return coords
+    out = coords.clone()
+    out[:, 1:] = out[:, 1:] * (2 ** int(upsample_times))
+    return out
+
+
 def cap_sparse_coords(coords: torch.Tensor, max_tokens: int) -> torch.Tensor:
     """Keep at most `max_tokens` occupancy voxels while covering the same volume."""
     if coords is None or max_tokens is None or coords.shape[0] <= max_tokens:

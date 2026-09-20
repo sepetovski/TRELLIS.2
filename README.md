@@ -220,7 +220,7 @@ WSL notes:
 python example_1536.py yourphoto.png
 ```
 
-This requests `pipeline_type='1536_cascade'` (512 shape SLat, then the 1024 DiT aimed at 1536). Full 1536³ still needs ~49k sparse tokens, which does not fit 4 GB. The script caps tokens (default `TRELLIS_MAX_TOKENS=12288`) and will not go below `TRELLIS_MIN_HR=1024`, so the result is 1024–1536, never a silent 512 fall-back. If the second shape-SLat bar dies with `device not ready`, run `wsl --shutdown` and retry with `TRELLIS_MAX_TOKENS=8192`.
+This requests `pipeline_type='1536_cascade'` (512 shape SLat, then the 1024 DiT aimed at 1536). Full 1536³ still needs ~49k sparse tokens, which does not fit 4 GB. On GPUs under 8 GB the 4-level VAE coord upsample is skipped (it TDRs on a dragon-like shape); occupancy is integer-scaled and the 1024 DiT still runs. Tokens default to `TRELLIS_MAX_TOKENS=12288` with floor `TRELLIS_MIN_HR=1024`, so the result is 1024–1536, never a silent 512 fall-back. After `device not ready`, `wsl --shutdown` then retry with `TRELLIS_MAX_TOKENS=8192`.
 
 #### Web Demo
 
