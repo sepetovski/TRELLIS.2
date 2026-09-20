@@ -135,6 +135,13 @@ class OffloadTests(unittest.TestCase):
         self.assertGreater(out.shape[0], 8)
         self.assertEqual(out.shape[1], 4)
 
+    def test_dilate_occupancy_coords(self):
+        coords = torch.tensor([[0, 1, 2, 3]])
+        out = offload.dilate_occupancy_coords(coords, factor=2)
+        self.assertEqual(out.shape[0], 8)
+        self.assertTrue(torch.equal(out[0], torch.tensor([0, 2, 4, 6])))
+        self.assertTrue(torch.equal(out[-1], torch.tensor([0, 3, 5, 7])))
+
     def test_scale_coords_upsample(self):
         coords = torch.tensor([[0, 1, 2, 3], [0, 4, 5, 6]])
         out = offload.scale_coords_upsample(coords, 4)

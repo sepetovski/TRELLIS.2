@@ -375,11 +375,15 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         upsample_times = 4
         max_voxels = offload.recommend_upsample_voxels() if self.low_vram else None
         if max_voxels == 0:
-            hr_coords = offload.scale_coords_upsample(slat.coords, upsample_times)
+            n0 = int(slat.coords.shape[0])
+            filled = offload.dilate_occupancy_coords(slat.coords, factor=2)
+            filled = offload.cap_sparse_coords(filled, max_num_tokens)
+            hr_coords = offload.scale_coords_upsample(filled, upsample_times - 1)
             print(
-                f"[TRELLIS.2] Skipping VAE cascade upsample on this GPU "
-                f"({int(hr_coords.shape[0])} voxels ×{2 ** upsample_times}). "
-                "The 1024 DiT still runs. Set TRELLIS_UPSAMPLE_VOXELS=full to force C2S."
+                f"[TRELLIS.2] Skipping VAE cascade upsample. Cheap 2× occupancy "
+                f"fill {n0} → {int(filled.shape[0])} voxels, then ×{2 ** (upsample_times - 1)} "
+                f"to the HR grid. The 1024 DiT still runs. "
+                "Set TRELLIS_UPSAMPLE_VOXELS=full to force C2S."
             )
             del slat
             offload.release_cuda_memory()

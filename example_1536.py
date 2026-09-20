@@ -37,9 +37,8 @@ import imageio
 from PIL import Image
 import torch
 from trellis2.pipelines import Trellis2ImageTo3DPipeline
-from trellis2.utils import render_utils, offload
+from trellis2.utils import render_utils, offload, mesh_utils
 from trellis2.renderers import EnvMap
-import o_voxel
 
 
 IMAGE_PATH = os.environ.get("TRELLIS_IMAGE", "assets/example_image/T.png")
@@ -99,7 +98,8 @@ def main():
     )[0]
     achieved = int(round(1 / mesh.voxel_size))
     print(f"Output voxel size {mesh.voxel_size} (~{achieved}³; requested 1536³)")
-    mesh.simplify(16777216)
+    if int(mesh.faces.shape[0]) > 10000:
+        mesh.simplify(16777216)
     offload.release_cuda_memory()
 
     try:
@@ -113,23 +113,13 @@ def main():
     except Exception as e:
         print(f"Video render skipped ({e})")
 
-    glb = o_voxel.postprocess.to_glb(
-        vertices=mesh.vertices,
-        faces=mesh.faces,
-        attr_volume=mesh.attrs,
-        coords=mesh.coords,
-        attr_layout=mesh.layout,
-        voxel_size=mesh.voxel_size,
-        aabb=[[-0.5, -0.5, -0.5], [0.5, 0.5, 0.5]],
-        decimation_target=150000,
+    mesh_utils.export_pbr_glb(
+        mesh,
+        "sample_1536.glb",
         texture_size=texture_size,
+        decimation_target=150000,
         remesh=False,
-        remesh_band=1,
-        remesh_project=0,
-        verbose=True,
     )
-    glb.export("sample_1536.glb", extension_webp=True)
-    print("Wrote sample_1536.glb")
 
 
 if __name__ == "__main__":

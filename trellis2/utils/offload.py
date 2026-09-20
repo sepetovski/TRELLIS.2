@@ -131,6 +131,19 @@ def scale_coords_upsample(coords: torch.Tensor, upsample_times: int) -> torch.Te
     return out
 
 
+def dilate_occupancy_coords(coords: torch.Tensor, factor: int = 2) -> torch.Tensor:
+    """Replace each occupancy voxel with an `factor`³ block (no VAE)."""
+    if coords is None or factor <= 1:
+        return coords
+    device = coords.device
+    rng = torch.arange(int(factor), device=device, dtype=coords.dtype)
+    offs = torch.stack(torch.meshgrid(rng, rng, rng, indexing="ij"), dim=-1).reshape(-1, 3)
+    k = offs.shape[0]
+    batch = coords[:, :1].repeat_interleave(k, dim=0)
+    xyz = coords[:, 1:].repeat_interleave(k, dim=0) * int(factor) + offs.repeat(coords.shape[0], 1)
+    return torch.cat([batch, xyz], dim=1).contiguous()
+
+
 def cap_sparse_coords(coords: torch.Tensor, max_tokens: int) -> torch.Tensor:
     """Keep at most `max_tokens` occupancy voxels while covering the same volume."""
     if coords is None or max_tokens is None or coords.shape[0] <= max_tokens:
