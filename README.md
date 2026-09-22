@@ -181,6 +181,8 @@ python example_low_vram.py
 
 The GLB is named after the input image (`house.png` → `house.glb`).
 
+The 512³ shape pass is unchanged. The GLB bake uses 1,000,000 faces and a 4096 texture (same as the full example) with remesh left off, and it runs before the preview video so the card is empty. If that bake runs out of VRAM it steps down to 500k/2048, then 100k/1024. Override with `TRELLIS_DECIMATION_TARGET` and `TRELLIS_TEXTURE_SIZE`.
+
 ### Low-VRAM / 4 GB GPUs
 
 TRELLIS.2 is a **cascade of independently trained modules** (sparse-structure DiT, 512 shape SLat, 1024 shape SLat, texture SLat, VAEs), not one 4B forward. `low_vram=True` already keeps idle modules on CPU. That is enough to finish the sparse-structure pass and the 512 shape-SLat pass on a 4 GB card. It is **not** enough for the 1024 shape-SLat pass: one 1.3B bf16 DiT is ~2.6 GB of weights, and the MLP GELU activations at high token counts fill the rest of the 4096 MiB. `nvidia-smi` then sits at ~3640/4096 MiB with 100% util, steps jump from ~2 s/it to ~15 s/it, and the driver reports `CUDA driver error: device not ready`. Raising Windows `TdrDelay` does not fix that — it is a memory-limit fault, not a timeout.

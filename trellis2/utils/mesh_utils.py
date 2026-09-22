@@ -290,6 +290,69 @@ def export_plain_glb(path, vertices_np, faces_np) -> str:
     return path
 
 
+def export_textured_glb(
+    mesh,
+    path,
+    *,
+    decimation_target=None,
+    texture_size=None,
+    remesh=False,
+) -> str:
+    """
+    Bake a textured GLB. Starts at the requested face count and texture size
+    (defaults: 1,000,000 faces, 4096 texture). If that runs out of VRAM, retries
+    a smaller bake. Other failures are not retried.
+    """
+    import o_voxel
+    from trellis2.utils import offload
+    from trellis2.utils.bake_limits import (
+        RAISED_DECIMATION_TARGET,
+        RAISED_TEXTURE_SIZE,
+        bake_size_attempts,
+        is_cuda_oom,
+    )
+
+    if decimation_target is None:
+        decimation_target = RAISED_DECIMATION_TARGET
+    if texture_size is None:
+        texture_size = RAISED_TEXTURE_SIZE
+
+    attempts = bake_size_attempts(decimation_target, texture_size)
+    for index, (faces, tex) in enumerate(attempts):
+        print(
+            f"Baking GLB: decimation_target={faces}, texture_size={tex}, remesh={remesh}"
+        )
+        offload.release_cuda_memory()
+        try:
+            glb = o_voxel.postprocess.to_glb(
+                vertices=mesh.vertices,
+                faces=mesh.faces,
+                attr_volume=mesh.attrs,
+                coords=mesh.coords,
+                attr_layout=mesh.layout,
+                voxel_size=mesh.voxel_size,
+                aabb=[[-0.5, -0.5, -0.5], [0.5, 0.5, 0.5]],
+                decimation_target=faces,
+                texture_size=tex,
+                remesh=remesh,
+                remesh_band=1,
+                remesh_project=0,
+                verbose=True,
+            )
+            glb.export(path, extension_webp=True)
+            print(f"Wrote {path} (decimation_target={faces}, texture_size={tex})")
+            return path
+        except Exception as e:
+            if not is_cuda_oom(e) or index == len(attempts) - 1:
+                raise
+            print(
+                f"Bake ran out of VRAM at decimation_target={faces}, "
+                f"texture_size={tex} ({e}). Retrying a smaller bake."
+            )
+            offload.release_cuda_memory()
+    raise RuntimeError("GLB bake failed")
+
+
 def export_pbr_glb(mesh, path, *, texture_size=1024, decimation_target=100000, remesh=False) -> str:
     """
     Bake a PBR GLB via o_voxel. If cuMesh cleanup crashes (tiny 1536 meshes

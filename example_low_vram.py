@@ -27,7 +27,13 @@ This script:
   * deletes each finished 1.3B DiT from RAM before the next stage
     (a bare `Killed` with no CUDA traceback is the WSL OOM killer)
   * does not keep the HDRI on the GPU during generation
-  * uses a smaller GLB export so postprocess does not OOM
+  * bakes the GLB at 1,000,000 faces and 4096 texture (remesh stays off)
+    before the preview video, while VRAM is empty. If that bake runs out of
+    VRAM it steps down to 500k/2048, then the old 100k/1024.
+
+Override the bake without editing the file:
+
+    TRELLIS_DECIMATION_TARGET=500000 TRELLIS_TEXTURE_SIZE=2048 python example_low_vram.py photo.png
 
 If WSL still `Killed`s the process, raise the WSL memory cap. In Windows
 create/edit `%UserProfile%\\.wslconfig`:
@@ -59,13 +65,15 @@ import imageio
 from PIL import Image
 import torch
 from trellis2.pipelines import Trellis2ImageTo3DPipeline
-from trellis2.utils import render_utils, offload
+from trellis2.utils import render_utils, offload, mesh_utils
+from trellis2.utils.bake_limits import RAISED_DECIMATION_TARGET, RAISED_TEXTURE_SIZE
 from trellis2.renderers import EnvMap
-import o_voxel
 
 
 IMAGE_PATH = os.environ.get("TRELLIS_IMAGE", "assets/example_image/T.png")
 PIPELINE_TYPE = os.environ.get("TRELLIS_PIPELINE_TYPE", "512")
+DECIMATION_TARGET = int(os.environ.get("TRELLIS_DECIMATION_TARGET", str(RAISED_DECIMATION_TARGET)))
+TEXTURE_SIZE = int(os.environ.get("TRELLIS_TEXTURE_SIZE", str(RAISED_TEXTURE_SIZE)))
 
 
 def main():
@@ -118,6 +126,20 @@ def main():
     mp4_name = f"{stem}.mp4"
     glb_name = f"{stem}.glb"
 
+    # Bake while the card is empty. The preview video is optional and comes after.
+    print(
+        f"GLB bake request: decimation_target={DECIMATION_TARGET}, "
+        f"texture_size={TEXTURE_SIZE}, remesh=False"
+    )
+    mesh_utils.export_textured_glb(
+        mesh,
+        glb_name,
+        decimation_target=DECIMATION_TARGET,
+        texture_size=TEXTURE_SIZE,
+        remesh=False,
+    )
+    offload.release_cuda_memory()
+
     try:
         envmap = EnvMap(torch.tensor(
             cv2.cvtColor(cv2.imread("assets/hdri/forest.exr", cv2.IMREAD_UNCHANGED), cv2.COLOR_BGR2RGB),
@@ -128,24 +150,6 @@ def main():
         print(f"Wrote {mp4_name}")
     except Exception as e:
         print(f"Video render skipped ({e})")
-
-    glb = o_voxel.postprocess.to_glb(
-        vertices=mesh.vertices,
-        faces=mesh.faces,
-        attr_volume=mesh.attrs,
-        coords=mesh.coords,
-        attr_layout=mesh.layout,
-        voxel_size=mesh.voxel_size,
-        aabb=[[-0.5, -0.5, -0.5], [0.5, 0.5, 0.5]],
-        decimation_target=100000,
-        texture_size=1024,
-        remesh=False,
-        remesh_band=1,
-        remesh_project=0,
-        verbose=True,
-    )
-    glb.export(glb_name, extension_webp=True)
-    print(f"Wrote {glb_name}")
 
 
 if __name__ == "__main__":

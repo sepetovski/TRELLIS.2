@@ -6,7 +6,8 @@ import imageio
 from PIL import Image
 import torch
 from trellis2.pipelines import Trellis2ImageTo3DPipeline
-from trellis2.utils import render_utils, offload
+from trellis2.utils import render_utils, offload, mesh_utils
+from trellis2.utils.bake_limits import RAISED_DECIMATION_TARGET, RAISED_TEXTURE_SIZE
 from trellis2.renderers import EnvMap
 import o_voxel
 
@@ -45,33 +46,47 @@ mesh = pipeline.run(image, **run_kwargs)[0]
 mesh.simplify(16777216)  # nvdiffrast limit
 offload.release_cuda_memory()
 
-# 3. Setup Environment Map (only needed for visualization)
+# 3. Export to GLB before the preview video, so the bake gets the free VRAM.
+# On a small GPU the shape stays the 512 mesh (remesh off) but the bake uses
+# the same face count and texture size as the full export.
+if low_gpu:
+    decimation_target = int(os.environ.get("TRELLIS_DECIMATION_TARGET", str(RAISED_DECIMATION_TARGET)))
+    texture_size = int(os.environ.get("TRELLIS_TEXTURE_SIZE", str(RAISED_TEXTURE_SIZE)))
+    mesh_utils.export_textured_glb(
+        mesh,
+        "sample.glb",
+        decimation_target=decimation_target,
+        texture_size=texture_size,
+        remesh=False,
+    )
+else:
+    glb = o_voxel.postprocess.to_glb(
+        vertices            =   mesh.vertices,
+        faces               =   mesh.faces,
+        attr_volume         =   mesh.attrs,
+        coords              =   mesh.coords,
+        attr_layout         =   mesh.layout,
+        voxel_size          =   mesh.voxel_size,
+        aabb                =   [[-0.5, -0.5, -0.5], [0.5, 0.5, 0.5]],
+        decimation_target   =   1000000,
+        texture_size        =   4096,
+        remesh              =   True,
+        remesh_band         =   1,
+        remesh_project      =   0,
+        verbose             =   True
+    )
+    glb.export("sample.glb", extension_webp=True)
+offload.release_cuda_memory()
+
+# 4. Setup Environment Map (only needed for visualization)
 envmap = EnvMap(torch.tensor(
     cv2.cvtColor(cv2.imread('assets/hdri/forest.exr', cv2.IMREAD_UNCHANGED), cv2.COLOR_BGR2RGB),
     dtype=torch.float32, device='cuda'
 ))
 
-# 4. Render Video
+# 5. Render Video
 try:
     video = render_utils.make_pbr_vis_frames(render_utils.render_video(mesh, envmap=envmap))
     imageio.mimsave("sample.mp4", video, fps=15)
 except Exception as e:
     print(f"Video render skipped ({e})")
-
-# 5. Export to GLB
-glb = o_voxel.postprocess.to_glb(
-    vertices            =   mesh.vertices,
-    faces               =   mesh.faces,
-    attr_volume         =   mesh.attrs,
-    coords              =   mesh.coords,
-    attr_layout         =   mesh.layout,
-    voxel_size          =   mesh.voxel_size,
-    aabb                =   [[-0.5, -0.5, -0.5], [0.5, 0.5, 0.5]],
-    decimation_target   =   100000 if low_gpu else 1000000,
-    texture_size        =   1024 if low_gpu else 4096,
-    remesh              =   not low_gpu,
-    remesh_band         =   1,
-    remesh_project      =   0,
-    verbose             =   True
-)
-glb.export("sample.glb", extension_webp=True)
