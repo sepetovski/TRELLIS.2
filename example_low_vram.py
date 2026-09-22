@@ -60,13 +60,13 @@ import sys
 os.environ["OPENCV_IO_ENABLE_OPENEXR"] = "1"
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True,max_split_size_mb:128"
 
-import cv2
 import imageio
 from PIL import Image
 import torch
 from trellis2.pipelines import Trellis2ImageTo3DPipeline
 from trellis2.utils import render_utils, offload, mesh_utils
 from trellis2.utils.bake_limits import RAISED_DECIMATION_TARGET, default_texture_size
+from trellis2.utils.hdri import load_latlong_rgb, preview_settings
 from trellis2.renderers import EnvMap
 
 
@@ -150,15 +150,28 @@ def main():
     offload.release_cuda_memory()
 
     try:
-        envmap = EnvMap(torch.tensor(
-            cv2.cvtColor(cv2.imread("assets/hdri/forest.exr", cv2.IMREAD_UNCHANGED), cv2.COLOR_BGR2RGB),
-            dtype=torch.float32, device="cuda",
-        ))
-        video = render_utils.make_pbr_vis_frames(render_utils.render_video(mesh, envmap=envmap))
+        # forest.exr is DWAB. OpenCV 5 imread returns empty and cvtColor crashes.
+        hdri = load_latlong_rgb("assets/hdri/forest.exr")
+        envmap = EnvMap(torch.tensor(hdri, dtype=torch.float32, device="cuda"))
+        preview_res, preview_frames, preview_ssaa = preview_settings(total_gb)
+        print(
+            f"Rendering preview {mp4_name}: {preview_res}px, {preview_frames} frames. "
+            "The GLB is already written."
+        )
+        video = render_utils.make_pbr_vis_frames(
+            render_utils.render_video(
+                mesh,
+                envmap=envmap,
+                resolution=preview_res,
+                num_frames=preview_frames,
+                ssaa=preview_ssaa,
+            ),
+            resolution=preview_res,
+        )
         imageio.mimsave(mp4_name, video, fps=15)
         print(f"Wrote {mp4_name}")
     except Exception as e:
-        print(f"Video render skipped ({e})")
+        print(f"GLB is already saved. Preview video skipped ({e})")
 
 
 if __name__ == "__main__":

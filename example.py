@@ -1,13 +1,13 @@
 import os
 os.environ['OPENCV_IO_ENABLE_OPENEXR'] = '1'
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True,max_split_size_mb:128"
-import cv2
 import imageio
 from PIL import Image
 import torch
 from trellis2.pipelines import Trellis2ImageTo3DPipeline
 from trellis2.utils import render_utils, offload, mesh_utils
 from trellis2.utils.bake_limits import RAISED_DECIMATION_TARGET, default_texture_size
+from trellis2.utils.hdri import load_latlong_rgb, preview_settings
 from trellis2.renderers import EnvMap
 import o_voxel
 
@@ -78,15 +78,18 @@ else:
     glb.export("sample.glb", extension_webp=True)
 offload.release_cuda_memory()
 
-# 4. Setup Environment Map (only needed for visualization)
-envmap = EnvMap(torch.tensor(
-    cv2.cvtColor(cv2.imread('assets/hdri/forest.exr', cv2.IMREAD_UNCHANGED), cv2.COLOR_BGR2RGB),
-    dtype=torch.float32, device='cuda'
-))
-
-# 5. Render Video
+# 4. Preview video. The GLB above is the result; this only makes sample.mp4.
 try:
-    video = render_utils.make_pbr_vis_frames(render_utils.render_video(mesh, envmap=envmap))
+    hdri = load_latlong_rgb("assets/hdri/forest.exr")
+    envmap = EnvMap(torch.tensor(hdri, dtype=torch.float32, device="cuda"))
+    preview_res, preview_frames, preview_ssaa = preview_settings(total_gb)
+    video = render_utils.make_pbr_vis_frames(
+        render_utils.render_video(
+            mesh, envmap=envmap,
+            resolution=preview_res, num_frames=preview_frames, ssaa=preview_ssaa,
+        ),
+        resolution=preview_res,
+    )
     imageio.mimsave("sample.mp4", video, fps=15)
 except Exception as e:
-    print(f"Video render skipped ({e})")
+    print(f"GLB is already saved. Preview video skipped ({e})")
