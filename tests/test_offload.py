@@ -110,8 +110,30 @@ class OffloadTests(unittest.TestCase):
         old = os.environ.get("TRELLIS_SEQ_CFG")
         os.environ.pop("TRELLIS_SEQ_CFG", None)
         try:
+            offload._SEQ_CFG_LOGGED = False
             self.assertFalse(offload.recommend_sequential_cfg())
+            sparse = type("S", (), {})()
+            sparse.coords = torch.zeros(5840, 4)
+            self.assertFalse(offload.recommend_sequential_cfg(sparse, gpu_gb=0.0))
+            self.assertTrue(offload.recommend_sequential_cfg(sparse, gpu_gb=4.0))
+            self.assertFalse(offload.recommend_sequential_cfg(torch.zeros(2, 8, 16, 16, 16), gpu_gb=4.0))
         finally:
+            offload._SEQ_CFG_LOGGED = False
+            if old is None:
+                os.environ.pop("TRELLIS_SEQ_CFG", None)
+            else:
+                os.environ["TRELLIS_SEQ_CFG"] = old
+
+    def test_recommend_sequential_cfg_env_off(self):
+        old = os.environ.get("TRELLIS_SEQ_CFG")
+        os.environ["TRELLIS_SEQ_CFG"] = "0"
+        try:
+            offload._SEQ_CFG_LOGGED = False
+            sparse = type("S", (), {})()
+            sparse.coords = torch.zeros(5840, 4)
+            self.assertFalse(offload.recommend_sequential_cfg(sparse, gpu_gb=4.0))
+        finally:
+            offload._SEQ_CFG_LOGGED = False
             if old is None:
                 os.environ.pop("TRELLIS_SEQ_CFG", None)
             else:

@@ -74,11 +74,9 @@ def recommend_lr_tokens() -> Optional[int]:
     """
     Occupied-voxel cap for the 512 shape-SLat pass.
 
-    A character (mage, dragon) occupies ~3k–6k voxels at 32³ — that is
-    normal, not "too detailed". The previous 4096 default then 2×2×2-binned
-    those voxels down to ~900 and the mesh became a blob. Keep the budget
-    above typical character occupancy; only dense filled photos (house) need
-    thinning. Override with TRELLIS_LR_TOKENS.
+    Dual CFG at ~5840 house tokens TDRs 4 GB. Cap at 4096 by dropping
+    interior voxels (keep the silhouette / staff / brim). Never 2×2×2-bin
+    the 32³ grid. Override with TRELLIS_LR_TOKENS.
     """
     env = os.environ.get("TRELLIS_LR_TOKENS", "").strip()
     if env:
@@ -87,21 +85,59 @@ def recommend_lr_tokens() -> Optional[int]:
     if total <= 0:
         return None
     if total < 6:
-        return 8192
+        # Dual CFG at ~5–6k tokens TDRs 4 GB (house.png, RMSNorm `device not
+        # ready`). Interior-first to 4096 keeps a character silhouette;
+        # 2×2×2 binning is what collapsed mage to ~900 voxels.
+        return 4096
     if total < 8:
-        return 12288
+        return 8192
     return None
 
 
-def recommend_sequential_cfg() -> bool:
+def sparse_token_count(x) -> int:
+    """Number of sparse voxels/tokens, or 0 for dense tensors."""
+    if x is None:
+        return 0
+    coords = getattr(x, "coords", None)
+    if torch.is_tensor(coords) and coords.ndim >= 2:
+        return int(coords.shape[0])
+    feats = getattr(x, "feats", None)
+    if torch.is_tensor(feats) and feats.ndim >= 2:
+        return int(feats.shape[0])
+    return 0
+
+
+_SEQ_CFG_LOGGED = False
+
+
+def recommend_sequential_cfg(x=None, gpu_gb: Optional[float] = None) -> bool:
     """Park the CFG positive prediction on CPU before the negative forward.
 
-    Off by default. Token capping is what keeps 4 GB sampling alive; the extra
-    synchronize on every step made DiT sampling several times slower.
-    Enable with TRELLIS_SEQ_CFG=1 if a dense occupancy still TDRs.
+    Sparse-structure sampling is a small dense grid — leave both CFG
+    forwards in VRAM. Shape/texture SLat on 4 GB dies on the *second* CFG
+    pass (`k_rms_norm` / `device not ready`) once occupancy is a few
+    thousand tokens. Override with TRELLIS_SEQ_CFG=0/1.
     """
     env = os.environ.get("TRELLIS_SEQ_CFG", "").strip().lower()
-    return env in ("1", "true", "yes")
+    if env in ("1", "true", "yes"):
+        enabled = True
+    elif env in ("0", "false", "no"):
+        enabled = False
+    else:
+        tokens = sparse_token_count(x)
+        total = gpu_total_memory_gb() if gpu_gb is None else gpu_gb
+        enabled = bool(tokens >= 2048 and total > 0 and total < 6)
+    if enabled:
+        global _SEQ_CFG_LOGGED
+        if not _SEQ_CFG_LOGGED:
+            tokens = sparse_token_count(x)
+            extra = f" ({tokens} sparse tokens)" if tokens else ""
+            print(
+                "[TRELLIS.2] Sequential CFG: parking the positive pass on CPU"
+                f"{extra} so the negative pass fits 4 GB."
+            )
+            _SEQ_CFG_LOGGED = True
+    return enabled
 
 
 def recommend_upsample_voxels() -> Optional[int]:

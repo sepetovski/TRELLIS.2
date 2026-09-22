@@ -87,8 +87,9 @@ def main():
             "blocks over PCIe instead of sitting in VRAM."
         )
         print(
-            "Dense photos (house) may still thin interior voxels so shape-SLat "
-            "does not TDR. Characters at 3k–6k occupancy are left intact."
+            "Shape-SLat parks CFG on CPU (one pass at a time) and thins only "
+            "interior voxels above 4096. After `device not ready`, CUDA is dead "
+            "until PowerShell: wsl --shutdown — then retry."
         )
 
     pipeline = Trellis2ImageTo3DPipeline.from_pretrained(
