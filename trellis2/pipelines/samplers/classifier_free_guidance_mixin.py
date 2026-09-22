@@ -15,7 +15,7 @@ class ClassifierFreeGuidanceSamplerMixin:
             return super()._inference_model(model, x_t, t, neg_cond, **kwargs)
         else:
             pred_pos = super()._inference_model(model, x_t, t, cond, **kwargs)
-            if offload.recommend_sequential_cfg():
+            if offload.recommend_sequential_cfg(x_t):
                 parked = offload.park_activation(pred_pos)
                 del pred_pos
                 offload.release_cuda_memory()

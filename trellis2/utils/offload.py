@@ -74,9 +74,9 @@ def recommend_lr_tokens() -> Optional[int]:
     """
     Occupied-voxel cap for the 512 shape-SLat pass.
 
-    `T.png` is a sparse letter; a photo of a house fills most of the 32³
-    occupancy grid and the 4 GB card dies on the first shape-SLat step
-    (`device not ready` in attention RMSNorm). Override with TRELLIS_LR_TOKENS.
+    Dual CFG at ~5840 house tokens TDRs 4 GB. Cap at 4096 by dropping
+    interior voxels (keep the silhouette / staff / brim). Never 2×2×2-bin
+    the 32³ grid. Override with TRELLIS_LR_TOKENS.
     """
     env = os.environ.get("TRELLIS_LR_TOKENS", "").strip()
     if env:
@@ -85,21 +85,59 @@ def recommend_lr_tokens() -> Optional[int]:
     if total <= 0:
         return None
     if total < 6:
+        # Dual CFG at ~5–6k tokens TDRs 4 GB (house.png, RMSNorm `device not
+        # ready`). Interior-first to 4096 keeps a character silhouette;
+        # 2×2×2 binning is what collapsed mage to ~900 voxels.
         return 4096
     if total < 8:
         return 8192
     return None
 
 
-def recommend_sequential_cfg() -> bool:
+def sparse_token_count(x) -> int:
+    """Number of sparse voxels/tokens, or 0 for dense tensors."""
+    if x is None:
+        return 0
+    coords = getattr(x, "coords", None)
+    if torch.is_tensor(coords) and coords.ndim >= 2:
+        return int(coords.shape[0])
+    feats = getattr(x, "feats", None)
+    if torch.is_tensor(feats) and feats.ndim >= 2:
+        return int(feats.shape[0])
+    return 0
+
+
+_SEQ_CFG_LOGGED = False
+
+
+def recommend_sequential_cfg(x=None, gpu_gb: Optional[float] = None) -> bool:
     """Park the CFG positive prediction on CPU before the negative forward.
 
-    Off by default. Token capping is what keeps 4 GB sampling alive; the extra
-    synchronize on every step made DiT sampling several times slower.
-    Enable with TRELLIS_SEQ_CFG=1 if a dense occupancy still TDRs.
+    Sparse-structure sampling is a small dense grid — leave both CFG
+    forwards in VRAM. Shape/texture SLat on 4 GB dies on the *second* CFG
+    pass (`k_rms_norm` / `device not ready`) once occupancy is a few
+    thousand tokens. Override with TRELLIS_SEQ_CFG=0/1.
     """
     env = os.environ.get("TRELLIS_SEQ_CFG", "").strip().lower()
-    return env in ("1", "true", "yes")
+    if env in ("1", "true", "yes"):
+        enabled = True
+    elif env in ("0", "false", "no"):
+        enabled = False
+    else:
+        tokens = sparse_token_count(x)
+        total = gpu_total_memory_gb() if gpu_gb is None else gpu_gb
+        enabled = bool(tokens >= 2048 and total > 0 and total < 6)
+    if enabled:
+        global _SEQ_CFG_LOGGED
+        if not _SEQ_CFG_LOGGED:
+            tokens = sparse_token_count(x)
+            extra = f" ({tokens} sparse tokens)" if tokens else ""
+            print(
+                "[TRELLIS.2] Sequential CFG: parking the positive pass on CPU"
+                f"{extra} so the negative pass fits 4 GB."
+            )
+            _SEQ_CFG_LOGGED = True
+    return enabled
 
 
 def recommend_upsample_voxels() -> Optional[int]:
@@ -144,28 +182,68 @@ def dilate_occupancy_coords(coords: torch.Tensor, factor: int = 2) -> torch.Tens
     return torch.cat([batch, xyz], dim=1).contiguous()
 
 
+def _pack_voxel_keys(coords: torch.Tensor) -> torch.Tensor:
+    coords = coords.to(dtype=torch.int64)
+    return (coords[:, 0] << 48) | (coords[:, 1] << 32) | (coords[:, 2] << 16) | (coords[:, 3] & 0xFFFF)
+
+
+_NEIGHBOR_OFFSETS = (
+    (0, 1, 0, 0),
+    (0, -1, 0, 0),
+    (0, 0, 1, 0),
+    (0, 0, -1, 0),
+    (0, 0, 0, 1),
+    (0, 0, 0, -1),
+)
+
+
+def occupancy_neighbor_counts(coords: torch.Tensor) -> torch.Tensor:
+    """Count occupied 6-neighbors for each voxel (same batch index)."""
+    coords64 = coords.to(dtype=torch.int64)
+    keys = _pack_voxel_keys(coords64)
+    occ = torch.unique(keys)
+    counts = torch.zeros(coords64.shape[0], dtype=torch.int16, device=coords.device)
+    for dx, dy, dz, dw in _NEIGHBOR_OFFSETS:
+        nkeys = _pack_voxel_keys(coords64 + torch.tensor([dx, dy, dz, dw], device=coords.device, dtype=torch.int64))
+        counts += torch.isin(nkeys, occ).to(dtype=counts.dtype)
+    return counts
+
+
+def _stride_coords(coords: torch.Tensor, max_tokens: int) -> torch.Tensor:
+    """Spatially even subsample. Used only after interior voxels are gone."""
+    n = int(coords.shape[0])
+    xyz = coords[:, 1:].to(dtype=torch.int64)
+    order = torch.argsort(xyz[:, 0] * 1_000_000 + xyz[:, 1] * 1_000 + xyz[:, 2], stable=True)
+    sorted_c = coords[order]
+    idx = torch.linspace(0, n - 1, steps=max_tokens, device=coords.device)
+    idx = idx.round().long().unique()[:max_tokens]
+    return sorted_c[idx]
+
+
 def cap_sparse_coords(coords: torch.Tensor, max_tokens: int) -> torch.Tensor:
-    """Keep at most `max_tokens` occupancy voxels while covering the same volume."""
+    """Keep at most `max_tokens` occupancy voxels.
+
+    Drops *interior* voxels first (6-connected) so a filled house thins into a
+    shell while a character's staff, hat brim, and cloak stay. Do **not**
+    2×2×2-bin the 32³ grid: that collapsed 4548 mage voxels to ~900 and the
+    VAE decoded a blob (VAE level 1 reported 910 voxels).
+    """
     if coords is None or max_tokens is None or coords.shape[0] <= max_tokens:
         return coords
-    batch = coords[:, :1]
-    xyz = coords[:, 1:]
-    selected = coords
-    cell = 2
-    while selected.shape[0] > max_tokens and cell <= 32:
-        q = torch.cat([batch, xyz // cell], dim=1)
-        inverse = torch.unique(q, dim=0, return_inverse=True)[1]
-        order = torch.argsort(inverse, stable=True)
-        inv_sorted = inverse[order]
-        mask = torch.ones(inv_sorted.shape[0], dtype=torch.bool, device=coords.device)
-        mask[1:] = inv_sorted[1:] != inv_sorted[:-1]
-        selected = coords[order[mask].sort().values]
-        cell *= 2
+    n = int(coords.shape[0])
+    need_drop = n - int(max_tokens)
+    counts = occupancy_neighbor_counts(coords)
+    order = torch.argsort(counts, descending=True, stable=True)
+    keep = torch.ones(n, dtype=torch.bool, device=coords.device)
+    # Thin structures (0–2 neighbors) are the silhouette / staff / brim.
+    protected = counts <= 2
+    droppable = order[~protected[order]]
+    take = min(need_drop, int(droppable.shape[0]))
+    if take:
+        keep[droppable[:take]] = False
+    selected = coords[keep]
     if selected.shape[0] > max_tokens:
-        n = selected.shape[0]
-        idx = torch.linspace(0, n - 1, steps=max_tokens, device=selected.device)
-        idx = idx.round().long().unique()[:max_tokens]
-        selected = selected[idx]
+        selected = _stride_coords(selected, max_tokens)
     return selected.contiguous()
 
 
