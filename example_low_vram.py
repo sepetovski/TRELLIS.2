@@ -27,7 +27,8 @@ This script:
   * deletes each finished 1.3B DiT from RAM before the next stage
     (a bare `Killed` with no CUDA traceback is the WSL OOM killer)
   * does not keep the HDRI on the GPU during generation
-  * bakes the GLB at 1,000,000 faces and 2048 texture (remesh stays off)
+  * writes a `<name>_cutout.png` of the subject it actually sent to the model
+  * renders the preview without nvdiffrec (a simple light if that package is missing)
     before the preview video, while VRAM is empty. 4096 texture sampling
     TDRs a 4 GB card (`device not ready`); that cannot retry in-process.
 
@@ -126,12 +127,13 @@ def main():
             "Windows files are under /mnt/c/Users/<you>/..."
         )
     print(f"Using image: {os.path.abspath(image_path)}")
+    stem = os.path.splitext(os.path.basename(image_path))[0]
+    pipeline.cutout_save_path = os.path.abspath(f"{stem}_cutout.png")
     image = Image.open(image_path)
     mesh = pipeline.run(image, pipeline_type=PIPELINE_TYPE)[0]
     mesh.simplify(16777216)
     offload.release_cuda_memory()
 
-    stem = os.path.splitext(os.path.basename(image_path))[0]
     mp4_name = f"{stem}.mp4"
     glb_name = f"{stem}.glb"
 

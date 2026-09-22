@@ -50,16 +50,71 @@ class EnvMap:
         return self._nvdiffrec_envlight
 
     def shade(self, gb_pos, gb_normal, kd, ks, view_pos, specular=True):
-        return self._backend.shade(gb_pos, gb_normal, kd, ks, view_pos, specular)
-    
+        if not getattr(self, "_nvdiffrec_failed", False):
+            try:
+                return self._backend.shade(gb_pos, gb_normal, kd, ks, view_pos, specular)
+            except (ModuleNotFoundError, ImportError) as exc:
+                self._nvdiffrec_failed = True
+                print(
+                    f"[TRELLIS.2] nvdiffrec is not installed ({exc}). "
+                    "Preview video uses a simple light."
+                )
+        return (self._shade_simple(gb_pos, gb_normal, kd, ks, view_pos, specular),)
+
+    def _shade_simple(self, gb_pos, gb_normal, kd, ks, view_pos, specular=True):
+        """Lambert plus a tight specular. No nvdiffrec cubemap."""
+        normal = F.normalize(gb_normal, dim=-1, eps=1e-6)
+        light = torch.tensor([0.25, 1.0, 0.45], device=normal.device, dtype=normal.dtype)
+        light = light / light.norm()
+        ndotl = (normal * light).sum(dim=-1, keepdim=True).clamp(0, 1)
+        fill = (normal * (-light)).sum(dim=-1, keepdim=True).clamp(0, 1)
+        color = kd * (0.28 + 0.62 * ndotl + 0.18 * fill)
+        if specular and ks is not None:
+            view = view_pos
+            if view.ndim == gb_pos.ndim - 1:
+                view = view.unsqueeze(0)
+            view = F.normalize(view - gb_pos, dim=-1, eps=1e-6)
+            half = F.normalize(view + light, dim=-1, eps=1e-6)
+            ndoth = (normal * half).sum(dim=-1, keepdim=True).clamp(0, 1)
+            rough = ks[..., 1:2].clamp(0.05, 1.0)
+            metal = ks[..., 2:3].clamp(0, 1)
+            spec = ndoth ** (2.0 / rough).clamp(max=128)
+            f0 = 0.04 * (1.0 - metal) + kd * metal
+            color = color * (1.0 - metal) + spec * f0
+        if color.ndim == 4 and color.shape[0] == 1:
+            color = color[0]
+        return color
+
     def sample(self, directions: torch.Tensor):
-        if 'dr' not in globals():
-            import nvdiffrast.torch as dr
-        return dr.texture(
-            self._backend.base.unsqueeze(0),
-            directions.unsqueeze(0),
-            boundary_mode='cube',
-        )[0]
+        if not getattr(self, "_nvdiffrec_failed", False):
+            try:
+                if 'dr' not in globals():
+                    import nvdiffrast.torch as dr
+                return dr.texture(
+                    self._backend.base.unsqueeze(0),
+                    directions.unsqueeze(0),
+                    boundary_mode='cube',
+                )[0]
+            except (ModuleNotFoundError, ImportError):
+                self._nvdiffrec_failed = True
+        return self._sample_latlong(directions)
+
+    def _sample_latlong(self, directions: torch.Tensor) -> torch.Tensor:
+        direction = F.normalize(directions, dim=-1, eps=1e-6)
+        u = torch.atan2(direction[..., 0], -direction[..., 2]) / (2 * np.pi) + 0.5
+        v = torch.acos(direction[..., 1].clamp(-1, 1)) / np.pi
+        grid = torch.stack([u * 2 - 1, v * 2 - 1], dim=-1)
+        image = self.image
+        if image.ndim == 3:
+            image = image.permute(2, 0, 1).unsqueeze(0)
+        sampled = F.grid_sample(
+            image.float(),
+            grid.unsqueeze(0),
+            mode="bilinear",
+            padding_mode="border",
+            align_corners=True,
+        )
+        return sampled[0].permute(1, 2, 0)
             
 
 def intrinsics_to_projection(
