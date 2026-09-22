@@ -27,9 +27,9 @@ This script:
   * deletes each finished 1.3B DiT from RAM before the next stage
     (a bare `Killed` with no CUDA traceback is the WSL OOM killer)
   * does not keep the HDRI on the GPU during generation
-  * bakes the GLB at 1,000,000 faces and 4096 texture (remesh stays off)
-    before the preview video, while VRAM is empty. If that bake runs out of
-    VRAM it steps down to 500k/2048, then the old 100k/1024.
+  * bakes the GLB at 1,000,000 faces and 2048 texture (remesh stays off)
+    before the preview video, while VRAM is empty. 4096 texture sampling
+    TDRs a 4 GB card (`device not ready`); that cannot retry in-process.
 
 Override the bake without editing the file:
 
@@ -66,14 +66,12 @@ from PIL import Image
 import torch
 from trellis2.pipelines import Trellis2ImageTo3DPipeline
 from trellis2.utils import render_utils, offload, mesh_utils
-from trellis2.utils.bake_limits import RAISED_DECIMATION_TARGET, RAISED_TEXTURE_SIZE
+from trellis2.utils.bake_limits import RAISED_DECIMATION_TARGET, default_texture_size
 from trellis2.renderers import EnvMap
 
 
 IMAGE_PATH = os.environ.get("TRELLIS_IMAGE", "assets/example_image/T.png")
 PIPELINE_TYPE = os.environ.get("TRELLIS_PIPELINE_TYPE", "512")
-DECIMATION_TARGET = int(os.environ.get("TRELLIS_DECIMATION_TARGET", str(RAISED_DECIMATION_TARGET)))
-TEXTURE_SIZE = int(os.environ.get("TRELLIS_TEXTURE_SIZE", str(RAISED_TEXTURE_SIZE)))
 
 
 def main():
@@ -98,6 +96,17 @@ def main():
             "A photo (house, person, …) occupies more voxels than T.png. "
             "This build caps tokens on 4 GB so shape-SLat does not TDR."
         )
+        print(
+            "GLB bake on 4 GB is 1,000,000 faces / 2048 texture. "
+            "4096 texture sampling TDRs this card."
+        )
+
+    decimation_target = int(
+        os.environ.get("TRELLIS_DECIMATION_TARGET", str(RAISED_DECIMATION_TARGET))
+    )
+    texture_size = int(
+        os.environ.get("TRELLIS_TEXTURE_SIZE", str(default_texture_size(total_gb)))
+    )
 
     pipeline = Trellis2ImageTo3DPipeline.from_pretrained(
         "microsoft/TRELLIS.2-4B",
@@ -128,14 +137,14 @@ def main():
 
     # Bake while the card is empty. The preview video is optional and comes after.
     print(
-        f"GLB bake request: decimation_target={DECIMATION_TARGET}, "
-        f"texture_size={TEXTURE_SIZE}, remesh=False"
+        f"GLB bake request: decimation_target={decimation_target}, "
+        f"texture_size={texture_size}, remesh=False"
     )
     mesh_utils.export_textured_glb(
         mesh,
         glb_name,
-        decimation_target=DECIMATION_TARGET,
-        texture_size=TEXTURE_SIZE,
+        decimation_target=decimation_target,
+        texture_size=texture_size,
         remesh=False,
     )
     offload.release_cuda_memory()

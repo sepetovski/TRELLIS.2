@@ -300,22 +300,23 @@ def export_textured_glb(
 ) -> str:
     """
     Bake a textured GLB. Starts at the requested face count and texture size
-    (defaults: 1,000,000 faces, 4096 texture). If that runs out of VRAM, retries
-    a smaller bake. Other failures are not retried.
+    (defaults: 1,000,000 faces, 2048 texture). A Python OOM can retry a
+    smaller bake. `device not ready` cannot — CUDA is already dead.
     """
     import o_voxel
     from trellis2.utils import offload
     from trellis2.utils.bake_limits import (
         RAISED_DECIMATION_TARGET,
-        RAISED_TEXTURE_SIZE,
+        LOW_VRAM_TEXTURE_SIZE,
         bake_size_attempts,
         is_cuda_oom,
+        is_cuda_context_dead,
     )
 
     if decimation_target is None:
         decimation_target = RAISED_DECIMATION_TARGET
     if texture_size is None:
-        texture_size = RAISED_TEXTURE_SIZE
+        texture_size = LOW_VRAM_TEXTURE_SIZE
 
     attempts = bake_size_attempts(decimation_target, texture_size)
     for index, (faces, tex) in enumerate(attempts):
@@ -343,6 +344,17 @@ def export_textured_glb(
             print(f"Wrote {path} (decimation_target={faces}, texture_size={tex})")
             return path
         except Exception as e:
+            if is_cuda_context_dead(e):
+                print(
+                    f"Bake killed the CUDA context at decimation_target={faces}, "
+                    f"texture_size={tex} ({e}).\n"
+                    "This is not a Python OOM — Windows dropped the GPU. CUDA stays "
+                    "dead until WSL is reset. In PowerShell run:\n"
+                    "    wsl --shutdown\n"
+                    "Then reopen Ubuntu. Default bake on 4 GB is 1,000,000 faces / "
+                    "2048 texture. Do not pass TRELLIS_TEXTURE_SIZE=4096 on a 4 GB card."
+                )
+                raise
             if not is_cuda_oom(e) or index == len(attempts) - 1:
                 raise
             print(

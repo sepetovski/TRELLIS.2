@@ -7,7 +7,7 @@ from PIL import Image
 import torch
 from trellis2.pipelines import Trellis2ImageTo3DPipeline
 from trellis2.utils import render_utils, offload, mesh_utils
-from trellis2.utils.bake_limits import RAISED_DECIMATION_TARGET, RAISED_TEXTURE_SIZE
+from trellis2.utils.bake_limits import RAISED_DECIMATION_TARGET, default_texture_size
 from trellis2.renderers import EnvMap
 import o_voxel
 
@@ -47,11 +47,11 @@ mesh.simplify(16777216)  # nvdiffrast limit
 offload.release_cuda_memory()
 
 # 3. Export to GLB before the preview video, so the bake gets the free VRAM.
-# On a small GPU the shape stays the 512 mesh (remesh off) but the bake uses
-# the same face count and texture size as the full export.
+# On a small GPU the shape stays the 512 mesh (remesh off). Texture is 2048;
+# 4096 attribute sampling TDRs a 4 GB card.
 if low_gpu:
     decimation_target = int(os.environ.get("TRELLIS_DECIMATION_TARGET", str(RAISED_DECIMATION_TARGET)))
-    texture_size = int(os.environ.get("TRELLIS_TEXTURE_SIZE", str(RAISED_TEXTURE_SIZE)))
+    texture_size = int(os.environ.get("TRELLIS_TEXTURE_SIZE", str(default_texture_size(total_gb))))
     mesh_utils.export_textured_glb(
         mesh,
         "sample.glb",

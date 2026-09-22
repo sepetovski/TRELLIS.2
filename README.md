@@ -181,7 +181,7 @@ python example_low_vram.py
 
 The GLB is named after the input image (`house.png` → `house.glb`).
 
-The 512³ shape pass is unchanged. The GLB bake uses 1,000,000 faces and a 4096 texture (same as the full example) with remesh left off, and it runs before the preview video so the card is empty. If that bake runs out of VRAM it steps down to 500k/2048, then 100k/1024. Override with `TRELLIS_DECIMATION_TARGET` and `TRELLIS_TEXTURE_SIZE`.
+The 512³ shape pass is unchanged. On a 4 GB card the GLB bake uses 1,000,000 faces and a 2048 texture (remesh off), before the preview video. A 4096 texture dies at attribute sampling with `device not ready` and cannot retry until you run `wsl --shutdown`. Override with `TRELLIS_DECIMATION_TARGET` and `TRELLIS_TEXTURE_SIZE`.
 
 ### Low-VRAM / 4 GB GPUs
 
