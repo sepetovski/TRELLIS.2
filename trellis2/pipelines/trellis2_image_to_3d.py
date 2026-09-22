@@ -1,4 +1,5 @@
 from typing import *
+import os
 import torch
 import torch.nn as nn
 import numpy as np
@@ -9,6 +10,7 @@ from ..modules.sparse import SparseTensor
 from ..modules import image_feature_extractor
 from ..representations import Mesh, MeshWithVoxel
 from ..utils import offload
+from ..utils.image_preprocess import harden_rgba_alpha, maybe_cutout_without_rembg
 
 
 class Trellis2ImageTo3DPipeline(Pipeline):
@@ -187,19 +189,41 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         if has_alpha:
             output = input
         else:
-            input = input.convert('RGB')
-            self._ensure_rembg()
-            # BiRefNet at 1024² does not fit a 4 GB card. Keep it on CPU.
-            if self.low_vram:
-                print("[TRELLIS.2] Removing background on CPU (slow, but safe on 4 GB).")
-                self.rembg_model.cpu()
-                output = self.rembg_model(input)
+            cutout = maybe_cutout_without_rembg(input)
+            if cutout is not None:
+                print(
+                    "[TRELLIS.2] Skipping rembg (sprite already on a uniform "
+                    "background). Keeps black hoods/faces; set TRELLIS_FORCE_REMBG=1 "
+                    "to use BiRefNet."
+                )
+                output = cutout
             else:
-                with self._model_on_device(self.rembg_model):
+                input = input.convert('RGB')
+                self._ensure_rembg()
+                # BiRefNet at 1024² does not fit a 4 GB card. Keep it on CPU.
+                if self.low_vram:
+                    print("[TRELLIS.2] Removing background on CPU (slow, but safe on 4 GB).")
+                    self.rembg_model.cpu()
                     output = self.rembg_model(input)
+                else:
+                    with self._model_on_device(self.rembg_model):
+                        output = self.rembg_model(input)
+        # Soft alpha (painted glow, rembg fringe) composites into a gray shell
+        # that the 32³ occupancy DiT turns into a blob. Harden before crop.
+        harden = os.environ.get("TRELLIS_ALPHA_HARDEN", "0.5").strip()
+        try:
+            harden_t = float(harden)
+        except ValueError:
+            harden_t = 0.5
+        if harden_t > 0:
+            output = harden_rgba_alpha(output, threshold=harden_t)
         output_np = np.array(output)
         alpha = output_np[:, :, 3]
         bbox = np.argwhere(alpha > 0.8 * 255)
+        if bbox.size == 0:
+            bbox = np.argwhere(alpha > 0)
+        if bbox.size == 0:
+            raise ValueError("Preprocess produced an empty foreground. Try TRELLIS_FORCE_REMBG=1.")
         bbox = np.min(bbox[:, 1]), np.min(bbox[:, 0]), np.max(bbox[:, 1]), np.max(bbox[:, 0])
         center = (bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2
         size = max(bbox[2] - bbox[0], bbox[3] - bbox[1])
@@ -209,6 +233,10 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         output = np.array(output).astype(np.float32) / 255
         output = output[:, :, :3] * output[:, :, 3:4]
         output = Image.fromarray((output * 255).astype(np.uint8))
+        save_path = os.environ.get("TRELLIS_SAVE_PREPROCESS", "").strip()
+        if save_path:
+            output.save(save_path)
+            print(f"[TRELLIS.2] Wrote preprocessed image: {save_path}")
         return output
         
     def get_cond(self, image: Union[torch.Tensor, list[Image.Image]], resolution: int, include_neg_cond: bool = True) -> dict:
@@ -666,12 +694,14 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         )
         lr_cap = offload.recommend_lr_tokens()
         if lr_cap and coords.shape[0] > lr_cap:
-            print(
-                f"[TRELLIS.2] {coords.shape[0]} occupied voxels is too many for "
-                f"{gpu_gb:.1f} GB VRAM (a house photo is denser than T.png). "
-                f"Keeping {lr_cap} tokens. Override with TRELLIS_LR_TOKENS."
-            )
+            before = int(coords.shape[0])
             coords = offload.cap_sparse_coords(coords, lr_cap)
+            print(
+                f"[TRELLIS.2] {before} occupied voxels is above the {lr_cap} "
+                f"token budget for {gpu_gb:.1f} GB VRAM. Dropped interior voxels "
+                f"first ({before} → {int(coords.shape[0])}). A character at 3k–6k "
+                f"is normal and should not be coarsened. Override with TRELLIS_LR_TOKENS."
+            )
         if self.low_vram:
             self.drop_models("sparse_structure_flow_model", "sparse_structure_decoder")
         if pipeline_type == '512':

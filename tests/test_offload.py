@@ -135,6 +135,36 @@ class OffloadTests(unittest.TestCase):
         self.assertGreater(out.shape[0], 8)
         self.assertEqual(out.shape[1], 4)
 
+    def test_cap_sparse_coords_does_not_2x2x2_a_character(self):
+        """A mage-scale occupancy slightly over 4096 must not collapse to ~900."""
+        coords = []
+        for z in range(32):
+            for y in range(32):
+                for x in range(32):
+                    nx, ny, nz = (x - 16) / 11.0, (y - 16) / 13.0, (z - 16) / 10.0
+                    if nx * nx + ny * ny + nz * nz <= 1.0:
+                        coords.append([0, x, y, z])
+                    if 24 <= x <= 25 and 4 <= y <= 28 and 15 <= z <= 16:
+                        coords.append([0, x, y, z])
+        coords = torch.tensor(coords).unique(dim=0)
+        self.assertGreater(coords.shape[0], 4096)
+        self.assertLess(coords.shape[0], 9000)
+        out = offload.cap_sparse_coords(coords, 4096)
+        self.assertLessEqual(out.shape[0], 4096)
+        # Old 2×2×2 binning kept ~1/4–1/8 of voxels. Interior-first must keep
+        # a character-shaped cloud, not a potato.
+        self.assertGreaterEqual(out.shape[0], 3500)
+        staff_in = ((coords[:, 1] >= 24) & (coords[:, 1] <= 25) & (coords[:, 2] >= 4) & (coords[:, 2] <= 28)).sum().item()
+        staff_out = ((out[:, 1] >= 24) & (out[:, 1] <= 25) & (out[:, 2] >= 4) & (out[:, 2] <= 28)).sum().item()
+        self.assertGreater(staff_in, 0)
+        self.assertGreaterEqual(staff_out, int(0.7 * staff_in))
+
+    def test_cap_sparse_coords_noop_under_8192_character(self):
+        coords = torch.randint(0, 32, (4548, 4))
+        coords[:, 0] = 0
+        out = offload.cap_sparse_coords(coords, 8192)
+        self.assertTrue(torch.equal(out, coords))
+
     def test_dilate_occupancy_coords(self):
         coords = torch.tensor([[0, 1, 2, 3]])
         out = offload.dilate_occupancy_coords(coords, factor=2)

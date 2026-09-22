@@ -87,8 +87,8 @@ def main():
             "blocks over PCIe instead of sitting in VRAM."
         )
         print(
-            "A photo (house, person, …) occupies more voxels than T.png. "
-            "This build caps tokens on 4 GB so shape-SLat does not TDR."
+            "Dense photos (house) may still thin interior voxels so shape-SLat "
+            "does not TDR. Characters at 3k–6k occupancy are left intact."
         )
 
     pipeline = Trellis2ImageTo3DPipeline.from_pretrained(
@@ -109,18 +109,22 @@ def main():
             "Windows files are under /mnt/c/Users/<you>/..."
         )
     print(f"Using image: {os.path.abspath(image_path)}")
+    stem = os.path.splitext(os.path.basename(image_path))[0]
+    os.environ.setdefault("TRELLIS_SAVE_PREPROCESS", f"{stem}.preprocessed.png")
     image = Image.open(image_path)
     mesh = pipeline.run(image, pipeline_type=PIPELINE_TYPE)[0]
     mesh.simplify(16777216)
     offload.release_cuda_memory()
 
-    stem = os.path.splitext(os.path.basename(image_path))[0]
     mp4_name = f"{stem}.mp4"
     glb_name = f"{stem}.glb"
 
     try:
+        hdri = cv2.imread("assets/hdri/forest.exr", cv2.IMREAD_UNCHANGED)
+        if hdri is None:
+            raise FileNotFoundError("assets/hdri/forest.exr")
         envmap = EnvMap(torch.tensor(
-            cv2.cvtColor(cv2.imread("assets/hdri/forest.exr", cv2.IMREAD_UNCHANGED), cv2.COLOR_BGR2RGB),
+            cv2.cvtColor(hdri, cv2.COLOR_BGR2RGB),
             dtype=torch.float32, device="cuda",
         ))
         video = render_utils.make_pbr_vis_frames(render_utils.render_video(mesh, envmap=envmap))
