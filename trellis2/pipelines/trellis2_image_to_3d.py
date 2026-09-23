@@ -176,8 +176,10 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         """
         from trellis2.utils.cutout import (
             composite_on_black,
+            composite_original,
             is_isolated_cutout,
             refine_foreground,
+            subject_fraction,
         )
 
         max_size = max(input.size)
@@ -187,7 +189,12 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         rgba = np.array(input.convert("RGBA"))
         rgb = rgba[:, :, :3]
         alpha = rgba[:, :, 3]
-        if not is_isolated_cutout(alpha):
+        # A real cutout (T.png) is fed through unchanged. Rewriting its edge
+        # is what made later runs softer than the first one.
+        if is_isolated_cutout(alpha):
+            print("[TRELLIS.2] Existing cutout kept unchanged.")
+            image = composite_original(rgb, alpha)
+        else:
             print("[TRELLIS.2] Photo is not cut out. Removing the background.")
             self._ensure_rembg()
             # BiRefNet at 1024² does not fit a 4 GB card. Keep it on CPU.
@@ -201,15 +208,19 @@ class Trellis2ImageTo3DPipeline(Pipeline):
             rgba = np.array(output.convert("RGBA"))
             rgb = rgba[:, :, :3]
             alpha = rgba[:, :, 3]
-        else:
-            print("[TRELLIS.2] Photo already has a cutout. Cleaning the edge.")
-        rgb, alpha, note = refine_foreground(rgb, alpha)
-        print(f"[TRELLIS.2] {note}")
+            if subject_fraction(alpha) < 0.12:
+                rgb, alpha, note = refine_foreground(rgb, alpha)
+                print(f"[TRELLIS.2] {note}")
+                image = composite_on_black(rgb, alpha)
+            else:
+                frac = subject_fraction(alpha)
+                print(f"[TRELLIS.2] Background removed ({frac:.0%} of the photo). Mask kept as-is.")
+                image = composite_original(rgb, alpha)
         cutout_path = getattr(self, "cutout_save_path", None)
         if cutout_path:
-            Image.fromarray(np.dstack([rgb, alpha]), mode="RGBA").save(cutout_path)
-            print(f"[TRELLIS.2] Wrote cutout {cutout_path}")
-        return composite_on_black(rgb, alpha)
+            image.save(cutout_path)
+            print(f"[TRELLIS.2] Wrote model input {cutout_path}")
+        return image
         
     def get_cond(self, image: Union[torch.Tensor, list[Image.Image]], resolution: int, include_neg_cond: bool = True) -> dict:
         """

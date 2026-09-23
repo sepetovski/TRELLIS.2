@@ -165,6 +165,36 @@ def refine_foreground(rgb: np.ndarray, alpha: np.ndarray) -> Tuple[np.ndarray, n
     return rgb_out, alpha_out, note
 
 
+def composite_original(rgb: np.ndarray, alpha: np.ndarray) -> Image.Image:
+    """
+    Crop and premultiply the way the first 512 run did.
+
+    The bbox is the pixels with alpha above 0.8. The foreground is left as it
+    is: no erosion, no flood fill. That is the path that reconstructed T.png.
+    """
+    ys, xs = np.where(alpha > int(0.8 * 255))
+    if len(xs) == 0:
+        return composite_on_black(rgb, alpha)
+    x0, x1 = int(xs.min()), int(xs.max())
+    y0, y1 = int(ys.min()), int(ys.max())
+    center = ((x0 + x1) / 2.0, (y0 + y1) / 2.0)
+    size = int(max(x1 - x0, y1 - y0))
+    box = (
+        int(center[0] - size // 2),
+        int(center[1] - size // 2),
+        int(center[0] + size // 2),
+        int(center[1] + size // 2),
+    )
+    crop = Image.fromarray(np.dstack([rgb, alpha]), mode="RGBA").crop(box)
+    arr = np.array(crop).astype(np.float32) / 255.0
+    rgb_out = arr[:, :, :3] * arr[:, :, 3:4]
+    return Image.fromarray((rgb_out * 255).astype(np.uint8))
+
+
+def subject_fraction(alpha: np.ndarray) -> float:
+    return float((np.asarray(alpha) > int(0.45 * 255)).mean())
+
+
 def composite_on_black(rgb: np.ndarray, alpha: np.ndarray) -> Image.Image:
     """Crop to the subject and premultiply onto black, matching the model input."""
     ys, xs = np.where(alpha > int(0.5 * 255))

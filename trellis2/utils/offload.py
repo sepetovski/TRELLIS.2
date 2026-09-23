@@ -74,20 +74,23 @@ def recommend_lr_tokens() -> Optional[int]:
     """
     Occupied-voxel cap for the 512 shape-SLat pass.
 
-    `T.png` is a sparse letter; a photo of a house fills most of the 32³
-    occupancy grid and the 4 GB card dies on the first shape-SLat step
-    (`device not ready` in attention RMSNorm). Override with TRELLIS_LR_TOKENS.
+    `T.png` is a few thousand voxels and is never capped. A house can fill
+    most of the 32³ grid and the 4 GB card dies in attention RMSNorm.
+    Interior voxels are dropped before the shell is thinned. Override with
+    TRELLIS_LR_TOKENS (a count, or `full` to keep every voxel).
     """
-    env = os.environ.get("TRELLIS_LR_TOKENS", "").strip()
+    env = os.environ.get("TRELLIS_LR_TOKENS", "").strip().lower()
+    if env in ("full", "off", "none"):
+        return None
     if env:
         return int(env)
     total = gpu_total_memory_gb()
     if total <= 0:
         return None
     if total < 6:
-        return 4096
-    if total < 8:
         return 8192
+    if total < 8:
+        return 12288
     return None
 
 
@@ -144,9 +147,40 @@ def dilate_occupancy_coords(coords: torch.Tensor, factor: int = 2) -> torch.Tens
     return torch.cat([batch, xyz], dim=1).contiguous()
 
 
+def _drop_interior_voxels(coords: torch.Tensor) -> torch.Tensor:
+    """Drop voxels whose six face neighbors are also occupied. The shell stays."""
+    if coords.shape[0] < 64:
+        return coords
+    xyz = coords[:, 1:].detach().cpu().tolist()
+    occupied = set(map(tuple, xyz))
+    keep = []
+    for index, point in enumerate(xyz):
+        x, y, z = point
+        interior = (
+            (x + 1, y, z) in occupied and (x - 1, y, z) in occupied
+            and (x, y + 1, z) in occupied and (x, y - 1, z) in occupied
+            and (x, y, z + 1) in occupied and (x, y, z - 1) in occupied
+        )
+        if not interior:
+            keep.append(index)
+    if len(keep) == coords.shape[0]:
+        return coords
+    index = torch.tensor(keep, dtype=torch.long, device=coords.device)
+    return coords.index_select(0, index)
+
+
 def cap_sparse_coords(coords: torch.Tensor, max_tokens: int) -> torch.Tensor:
     """Keep at most `max_tokens` occupancy voxels while covering the same volume."""
     if coords is None or max_tokens is None or coords.shape[0] <= max_tokens:
+        return coords
+    peeled = _drop_interior_voxels(coords)
+    if peeled.shape[0] < coords.shape[0]:
+        print(
+            f"[TRELLIS.2] Dropped {coords.shape[0] - peeled.shape[0]} interior "
+            f"voxels, {peeled.shape[0]} left on the shell."
+        )
+        coords = peeled
+    if coords.shape[0] <= max_tokens:
         return coords
     batch = coords[:, :1]
     xyz = coords[:, 1:]

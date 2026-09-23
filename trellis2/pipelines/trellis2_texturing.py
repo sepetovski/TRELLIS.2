@@ -129,8 +129,10 @@ class Trellis2TexturingPipeline(Pipeline):
         """
         from trellis2.utils.cutout import (
             composite_on_black,
+            composite_original,
             is_isolated_cutout,
             refine_foreground,
+            subject_fraction,
         )
 
         max_size = max(input.size)
@@ -140,15 +142,18 @@ class Trellis2TexturingPipeline(Pipeline):
         rgba = np.array(input.convert("RGBA"))
         rgb = rgba[:, :, :3]
         alpha = rgba[:, :, 3]
-        if not is_isolated_cutout(alpha):
-            input_rgb = Image.fromarray(rgb)
-            with self._model_on_device(self.rembg_model):
-                output = self.rembg_model(input_rgb)
-            rgba = np.array(output.convert("RGBA"))
-            rgb = rgba[:, :, :3]
-            alpha = rgba[:, :, 3]
-        rgb, alpha, _note = refine_foreground(rgb, alpha)
-        return composite_on_black(rgb, alpha)
+        if is_isolated_cutout(alpha):
+            return composite_original(rgb, alpha)
+        input_rgb = Image.fromarray(rgb)
+        with self._model_on_device(self.rembg_model):
+            output = self.rembg_model(input_rgb)
+        rgba = np.array(output.convert("RGBA"))
+        rgb = rgba[:, :, :3]
+        alpha = rgba[:, :, 3]
+        if subject_fraction(alpha) < 0.12:
+            rgb, alpha, _note = refine_foreground(rgb, alpha)
+            return composite_on_black(rgb, alpha)
+        return composite_original(rgb, alpha)
         
     def get_cond(self, image: Union[torch.Tensor, list[Image.Image]], resolution: int, include_neg_cond: bool = True) -> dict:
         """

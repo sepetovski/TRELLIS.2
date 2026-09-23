@@ -2,7 +2,12 @@ import unittest
 
 import numpy as np
 
-from trellis2.utils.cutout import composite_on_black, is_isolated_cutout, refine_foreground
+from trellis2.utils.cutout import (
+    composite_on_black,
+    composite_original,
+    is_isolated_cutout,
+    refine_foreground,
+)
 
 
 def _house_with_ornament():
@@ -43,6 +48,16 @@ class CutoutTests(unittest.TestCase):
         _rgb, out_alpha, _note = refine_foreground(rgb, alpha)
         self.assertEqual(int(out_alpha[9, 20]), 0)
         self.assertGreater(int(out_alpha[20, 20]), 200)
+
+    def test_existing_cutout_is_not_rewritten(self):
+        rgb = np.zeros((40, 40, 3), dtype=np.uint8)
+        rgb[8:32, 10:28] = (20, 180, 40)
+        alpha = np.zeros((40, 40), dtype=np.uint8)
+        alpha[8:32, 10:28] = 255
+        image = composite_original(rgb, alpha)
+        arr = np.array(image)
+        self.assertGreater(float((arr[:, :, 1] > 100).mean()), 0.4)
+        self.assertEqual(arr.shape[0], arr.shape[1])
 
     def test_composite_drops_the_background(self):
         rgb, alpha = _house_with_ornament()
