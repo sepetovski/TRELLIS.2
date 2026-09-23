@@ -74,10 +74,12 @@ def recommend_lr_tokens() -> Optional[int]:
     """
     Occupied-voxel cap for the 512 shape-SLat pass.
 
-    `T.png` is a few thousand voxels and is never capped. A house can fill
-    most of the 32³ grid and the 4 GB card dies in attention RMSNorm.
-    Interior voxels are dropped before the shell is thinned. Override with
-    TRELLIS_LR_TOKENS (a count, or `full` to keep every voxel).
+    `T.png` is a few thousand voxels and is never capped. On a 4 GB card
+    the shape-SLat MLP dies with `device not ready` once occupancy gets
+    too dense: 3783 voxels (fairy) finished, 6712 (house2) died on step 0.
+    The cap stays at 4096. Interior voxels are dropped before the shell is
+    thinned. Override with TRELLIS_LR_TOKENS (a count, or `full` to keep
+    every voxel — that can TDR the card).
     """
     env = os.environ.get("TRELLIS_LR_TOKENS", "").strip().lower()
     if env in ("full", "off", "none"):
@@ -88,9 +90,9 @@ def recommend_lr_tokens() -> Optional[int]:
     if total <= 0:
         return None
     if total < 6:
-        return 8192
+        return 4096
     if total < 8:
-        return 12288
+        return 8192
     return None
 
 

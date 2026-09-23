@@ -679,8 +679,9 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         if lr_cap and coords.shape[0] > lr_cap:
             print(
                 f"[TRELLIS.2] {coords.shape[0]} occupied voxels is too many for "
-                f"{gpu_gb:.1f} GB VRAM (a house photo is denser than T.png). "
-                f"Keeping {lr_cap} tokens. Override with TRELLIS_LR_TOKENS."
+                f"{gpu_gb:.1f} GB. Shape-SLat dies around 6700 tokens on 4 GB "
+                f"(device not ready in GELU). Keeping {lr_cap}. "
+                f"Override with TRELLIS_LR_TOKENS."
             )
             coords = offload.cap_sparse_coords(coords, lr_cap)
         if self.low_vram:
