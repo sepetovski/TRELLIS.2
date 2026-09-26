@@ -11,6 +11,19 @@ from ..representations import Mesh, MeshWithVoxel
 from ..utils import offload
 
 
+def _park_off_gpu(obj):
+    """Drop CUDA caches and move a mesh or sparse tensor to CPU."""
+    if obj is None:
+        return obj
+    if hasattr(obj, "clear_spatial_cache"):
+        obj.clear_spatial_cache()
+    if hasattr(obj, "cpu"):
+        obj = obj.cpu()
+    if hasattr(obj, "clear_spatial_cache"):
+        obj.clear_spatial_cache()
+    return obj
+
+
 class Trellis2ImageTo3DPipeline(Pipeline):
     """
     Pipeline for inferring Trellis2 image-to-3D models.
@@ -562,6 +575,16 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         meshes, subs = self.decode_shape_slat(shape_slat, resolution)
         if self.low_vram:
             self.drop_models("shape_slat_decoder")
+            # Shape conv at ~2M voxels fits. Texture runs the same conv next,
+            # and the mesh plus subdiv maps still sitting on the GPU are what
+            # push the neighbor map into `device not ready`.
+            if hasattr(shape_slat, "clear_spatial_cache"):
+                shape_slat.clear_spatial_cache()
+            if hasattr(shape_slat, "cpu"):
+                shape_slat = shape_slat.cpu()
+            meshes = [_park_off_gpu(m) for m in meshes]
+            subs = [_park_off_gpu(s) for s in subs]
+            offload.release_cuda_memory()
             if parked_tex is not None:
                 tex_slat = parked_tex.to(self.device)
         tex_voxels = self.decode_tex_slat(tex_slat, subs)

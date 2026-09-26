@@ -47,8 +47,9 @@ then `wsl --shutdown` in PowerShell and reopen the terminal.
 
 Usage (WSL, after `conda activate trellis2`):
     cd ~/TRELLIS.2
-    git fetch fork cursor/low-vram-block-offload-3548
-    git checkout cursor/low-vram-block-offload-3548
+    git fetch fork cursor/raise-glb-export-limits-6656
+    git checkout cursor/raise-glb-export-limits-6656
+    git pull fork cursor/raise-glb-export-limits-6656
     python example_low_vram.py
 
 The GLB is named after the image (`house.png` → `house.glb`).
@@ -100,6 +101,10 @@ def main():
         print(
             "GLB bake on 4 GB is 1,000,000 faces / 2048 texture. "
             "4096 texture sampling TDRs this card."
+        )
+        print(
+            "A dense shell (toilet, house) reaches ~2M voxels at the last "
+            "texture upsample. That conv is capped at 1,500,000 so it does not TDR."
         )
 
     decimation_target = int(

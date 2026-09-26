@@ -107,6 +107,79 @@ def recommend_sequential_cfg() -> bool:
     return env in ("1", "true", "yes")
 
 
+# Shape VAE conv at 1,988,316 voxels finished on a 4 GB card. The texture
+# VAE runs the same conv afterwards, while the mesh is still resident, and
+# dies in the flex_gemm neighbor map (`device not ready`). Stay under that
+# peak. 449,867 parents still all keep a child; extra children fill the rest.
+TEX_DECODE_VOXEL_CAP = 1_500_000
+
+
+def recommend_tex_decode_voxels() -> Optional[int]:
+    """
+    Max children the texture VAE may spawn in one upsample on a small GPU.
+
+    None means keep every positive subdivision logit. Override with
+    TRELLIS_TEX_VOXELS (a count, or `full` to disable).
+    """
+    env = os.environ.get("TRELLIS_TEX_VOXELS", "").strip().lower()
+    if env in ("full", "off", "none"):
+        return None
+    if env:
+        return int(env)
+    total = gpu_total_memory_gb()
+    if total > 0 and total < 6:
+        return TEX_DECODE_VOXEL_CAP
+    return None
+
+
+def limit_subdiv_feats(feats: torch.Tensor, max_out: Optional[int]) -> torch.Tensor:
+    """
+    Thin [N, 8] subdivision logits so at most `max_out` children stay positive.
+
+    Each row is one parent voxel and each column is one of 8 children.
+    SparseChannel2Spatial keeps children with logit > 0. When that would
+    exceed `max_out`, keep the strongest child of as many parents as possible,
+    then spend the rest of the budget on the next-highest positive logits.
+    """
+    if feats is None or max_out is None or max_out < 0:
+        return feats
+    if feats.ndim != 2 or feats.shape[0] == 0 or feats.shape[-1] == 0:
+        return feats
+    if not feats.is_floating_point():
+        return feats
+    positive = feats > 0
+    n_pos = int(positive.sum().item())
+    if n_pos <= max_out:
+        return feats
+    if max_out == 0:
+        return feats.masked_fill(positive, 0)
+
+    masked = feats.masked_fill(~positive, float("-inf"))
+    best_logit, best_idx = masked.max(dim=-1)
+    has_child = torch.isfinite(best_logit)
+    n_parents = int(has_child.sum().item())
+    keep = torch.zeros_like(positive)
+    if n_parents <= max_out:
+        parent_rows = has_child.nonzero(as_tuple=False).flatten()
+        keep[parent_rows, best_idx[parent_rows]] = True
+        budget = max_out - n_parents
+        if budget > 0:
+            rest = positive & ~keep
+            n_rest = int(rest.sum().item())
+            if n_rest > 0:
+                rest_logits = feats.masked_fill(~rest, float("-inf")).reshape(-1)
+                k = min(budget, n_rest)
+                flat = torch.topk(rest_logits, k, largest=True, sorted=False).indices
+                keep.view(-1)[flat] = True
+    else:
+        parent_score = best_logit.masked_fill(~has_child, float("-inf"))
+        top_parents = torch.topk(parent_score, max_out, largest=True, sorted=False).indices
+        keep[top_parents, best_idx[top_parents]] = True
+
+    drop = positive & ~keep
+    return feats.masked_fill(drop, 0)
+
+
 def recommend_upsample_voxels() -> Optional[int]:
     """
     Max voxels allowed during cascade VAE C2S upsample.

@@ -6,6 +6,7 @@ import torch.utils.checkpoint
 from ...modules.utils import convert_module_to_f16, convert_module_to_f32, zero_module
 from ...modules import sparse as sp
 from ...modules.norm import LayerNorm32
+from ...utils import offload
 
 
 class SparseResBlock3d(nn.Module):
@@ -248,6 +249,14 @@ class SparseResBlockC2S3d(nn.Module):
         x = self.updown(x, subdiv_binarized)
         h = h.replace(self.norm2(h.feats))
         h = h.replace(F.silu(h.feats))
+        # The parent conv's workspace is still cached. Give it back before the
+        # expanded grid builds a neighbor map (the 4 GB TDR site).
+        if (
+            not self.training
+            and torch.cuda.is_available()
+            and h.coords.shape[0] >= 200_000
+        ):
+            torch.cuda.empty_cache()
         h = self.conv2(h)
         h = h + self.skip_connection(x)
         if self.pred_subdiv:
@@ -395,6 +404,34 @@ class SparseUnetVaeEncoder(nn.Module):
             return z
     
     
+def _cap_guide_subdiv(subdiv: sp.SparseTensor, device) -> sp.SparseTensor:
+    """Move one shape-decoder subdiv map onto `device`, thinning if it would TDR."""
+    cap = offload.recommend_tex_decode_voxels()
+    feats = subdiv.feats
+    if cap is not None and feats.ndim == 2:
+        before = int((feats > 0).sum().item())
+        limited = offload.limit_subdiv_feats(feats, cap)
+        after = int((limited > 0).sum().item())
+        if after < before:
+            print(
+                f"[TRELLIS.2] Texture upsample kept {after} of {before} voxels "
+                f"(cap {cap}) so the finest conv does not TDR."
+            )
+        feats = limited
+    target = torch.device(device)
+    coords = subdiv.coords
+    if feats.device != target:
+        feats = feats.to(target, non_blocking=True)
+    if coords.device != target:
+        coords = coords.to(target, non_blocking=True)
+    if feats is subdiv.feats and coords is subdiv.coords:
+        return subdiv
+    capped = subdiv.replace(feats, coords)
+    if hasattr(capped, "clear_spatial_cache"):
+        capped.clear_spatial_cache()
+    return capped
+
+
 class SparseUnetVaeDecoder(nn.Module):
     """
     Sparse Swin Transformer Unet VAE model.
@@ -489,7 +526,10 @@ class SparseUnetVaeDecoder(nn.Module):
                         sub.clear_spatial_cache()
                     subs.append(sub)
                 else:
-                    h = block(h, subdiv=guide_subs[i] if guide_subs is not None else None)
+                    subdiv = guide_subs[i] if guide_subs is not None else None
+                    if self.low_vram and subdiv is not None:
+                        subdiv = _cap_guide_subdiv(subdiv, device)
+                    h = block(h, subdiv=subdiv)
             else:
                 h = block(h)
             if self.low_vram:

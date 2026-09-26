@@ -212,6 +212,7 @@ WSL notes:
 - `TdrDelay=60` in the Windows registry is still useful so a long kernel is not killed, but it will not create extra VRAM.
 - Live tracing: `TRELLIS_VRAM_LOG=1 python example_low_vram.py` and `watch -n 0.5 nvidia-smi`.
 - After a `device not ready` fault, CUDA stays dead until WSL is reset. A Windows reboot is not always enough. In PowerShell run `wsl --shutdown`, then reopen Ubuntu. A photo (house, person, car) occupies far more voxels than `T.png`; the 512 path now prints `Sparse structure occupied voxels` and caps them on GPUs under 6 GB (default 4096; 6712 voxels TDRs a 4 GB card in shape-SLat). `TRELLIS_LR_TOKENS=full` keeps every voxel.
+- The texture VAE's last upsample is the same sparse conv. On `toilet.png` the shape pass finished at 1,988,316 voxels, then texture died in the flex_gemm neighbor map while that mesh was still on the GPU. The mesh is moved to CPU before texture decode, and GPUs under 6 GB keep that upsample at or under 1,500,000 voxels. `TRELLIS_TEX_VOXELS=full` disables the cap.
 - A bare `Killed` (no Python traceback) is the **Linux OOM killer** — WSL ran out of *system RAM*, not VRAM. Each unused 1.3B DiT is now deleted after its stage. If it still dies, give WSL more RAM in `%UserProfile%\\.wslconfig` (`memory=16GB`, `swap=8GB`) and run `wsl --shutdown`.
 
 #### Experimental 1536³ cascade (`example_1536.py`)
