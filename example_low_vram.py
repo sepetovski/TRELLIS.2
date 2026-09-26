@@ -27,7 +27,14 @@ This script:
   * deletes each finished 1.3B DiT from RAM before the next stage
     (a bare `Killed` with no CUDA traceback is the WSL OOM killer)
   * does not keep the HDRI on the GPU during generation
-  * uses a smaller GLB export so postprocess does not OOM
+  * writes a `<name>_cutout.png` of the subject it actually sent to the model
+  * renders the preview without nvdiffrec (a simple light if that package is missing)
+    before the preview video, while VRAM is empty. 4096 texture sampling
+    TDRs a 4 GB card (`device not ready`); that cannot retry in-process.
+
+Override the bake without editing the file:
+
+    TRELLIS_DECIMATION_TARGET=500000 TRELLIS_TEXTURE_SIZE=2048 python example_low_vram.py photo.png
 
 If WSL still `Killed`s the process, raise the WSL memory cap. In Windows
 create/edit `%UserProfile%\\.wslconfig`:
@@ -40,8 +47,9 @@ then `wsl --shutdown` in PowerShell and reopen the terminal.
 
 Usage (WSL, after `conda activate trellis2`):
     cd ~/TRELLIS.2
-    git fetch fork cursor/low-vram-block-offload-3548
-    git checkout cursor/low-vram-block-offload-3548
+    git fetch fork cursor/raise-glb-export-limits-6656
+    git checkout cursor/raise-glb-export-limits-6656
+    git pull fork cursor/raise-glb-export-limits-6656
     python example_low_vram.py
 
 The GLB is named after the image (`house.png` → `house.glb`).
@@ -54,14 +62,14 @@ import sys
 os.environ["OPENCV_IO_ENABLE_OPENEXR"] = "1"
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True,max_split_size_mb:128"
 
-import cv2
 import imageio
 from PIL import Image
 import torch
 from trellis2.pipelines import Trellis2ImageTo3DPipeline
-from trellis2.utils import render_utils, offload
+from trellis2.utils import render_utils, offload, mesh_utils
+from trellis2.utils.bake_limits import RAISED_DECIMATION_TARGET, default_texture_size
+from trellis2.utils.hdri import load_latlong_rgb, preview_settings
 from trellis2.renderers import EnvMap
-import o_voxel
 
 
 IMAGE_PATH = os.environ.get("TRELLIS_IMAGE", "assets/example_image/T.png")
@@ -90,6 +98,21 @@ def main():
             "A photo (house, person, …) occupies more voxels than T.png. "
             "This build caps tokens on 4 GB so shape-SLat does not TDR."
         )
+        print(
+            "GLB bake on 4 GB is 1,000,000 faces / 2048 texture. "
+            "4096 texture sampling TDRs this card."
+        )
+        print(
+            "A dense shell (toilet, house) reaches ~2M voxels at the last "
+            "texture upsample. That conv is capped at 1,500,000 so it does not TDR."
+        )
+
+    decimation_target = int(
+        os.environ.get("TRELLIS_DECIMATION_TARGET", str(RAISED_DECIMATION_TARGET))
+    )
+    texture_size = int(
+        os.environ.get("TRELLIS_TEXTURE_SIZE", str(default_texture_size(total_gb)))
+    )
 
     pipeline = Trellis2ImageTo3DPipeline.from_pretrained(
         "microsoft/TRELLIS.2-4B",
@@ -109,43 +132,53 @@ def main():
             "Windows files are under /mnt/c/Users/<you>/..."
         )
     print(f"Using image: {os.path.abspath(image_path)}")
+    stem = os.path.splitext(os.path.basename(image_path))[0]
+    pipeline.cutout_save_path = os.path.abspath(f"{stem}_cutout.png")
     image = Image.open(image_path)
     mesh = pipeline.run(image, pipeline_type=PIPELINE_TYPE)[0]
     mesh.simplify(16777216)
     offload.release_cuda_memory()
 
-    stem = os.path.splitext(os.path.basename(image_path))[0]
     mp4_name = f"{stem}.mp4"
     glb_name = f"{stem}.glb"
 
+    # Bake while the card is empty. The preview video is optional and comes after.
+    print(
+        f"GLB bake request: decimation_target={decimation_target}, "
+        f"texture_size={texture_size}, remesh=False"
+    )
+    mesh_utils.export_textured_glb(
+        mesh,
+        glb_name,
+        decimation_target=decimation_target,
+        texture_size=texture_size,
+        remesh=False,
+    )
+    offload.release_cuda_memory()
+
     try:
-        envmap = EnvMap(torch.tensor(
-            cv2.cvtColor(cv2.imread("assets/hdri/forest.exr", cv2.IMREAD_UNCHANGED), cv2.COLOR_BGR2RGB),
-            dtype=torch.float32, device="cuda",
-        ))
-        video = render_utils.make_pbr_vis_frames(render_utils.render_video(mesh, envmap=envmap))
+        # forest.exr is DWAB. OpenCV 5 imread returns empty and cvtColor crashes.
+        hdri = load_latlong_rgb("assets/hdri/forest.exr")
+        envmap = EnvMap(torch.tensor(hdri, dtype=torch.float32, device="cuda"))
+        preview_res, preview_frames, preview_ssaa = preview_settings(total_gb)
+        print(
+            f"Rendering preview {mp4_name}: {preview_res}px, {preview_frames} frames. "
+            "The GLB is already written."
+        )
+        video = render_utils.make_pbr_vis_frames(
+            render_utils.render_video(
+                mesh,
+                envmap=envmap,
+                resolution=preview_res,
+                num_frames=preview_frames,
+                ssaa=preview_ssaa,
+            ),
+            resolution=preview_res,
+        )
         imageio.mimsave(mp4_name, video, fps=15)
         print(f"Wrote {mp4_name}")
     except Exception as e:
-        print(f"Video render skipped ({e})")
-
-    glb = o_voxel.postprocess.to_glb(
-        vertices=mesh.vertices,
-        faces=mesh.faces,
-        attr_volume=mesh.attrs,
-        coords=mesh.coords,
-        attr_layout=mesh.layout,
-        voxel_size=mesh.voxel_size,
-        aabb=[[-0.5, -0.5, -0.5], [0.5, 0.5, 0.5]],
-        decimation_target=100000,
-        texture_size=1024,
-        remesh=False,
-        remesh_band=1,
-        remesh_project=0,
-        verbose=True,
-    )
-    glb.export(glb_name, extension_webp=True)
-    print(f"Wrote {glb_name}")
+        print(f"GLB is already saved. Preview video skipped ({e})")
 
 
 if __name__ == "__main__":

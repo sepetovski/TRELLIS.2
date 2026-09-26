@@ -125,6 +125,26 @@ class OffloadTests(unittest.TestCase):
         out = offload.cap_sparse_coords(coords, 10)
         self.assertTrue(torch.equal(out, coords))
 
+    def test_cap_drops_interior_before_the_shell(self):
+        xs = torch.arange(8)
+        grid = torch.stack(torch.meshgrid(xs, xs, xs, indexing="ij"), dim=-1).reshape(-1, 3)
+        coords = torch.cat([torch.zeros(grid.shape[0], 1, dtype=torch.long), grid], dim=1)
+        out = offload.cap_sparse_coords(coords, 296)
+        self.assertEqual(out.shape[0], 296)
+        center = (out[:, 1:] == torch.tensor([4, 4, 4])).all(dim=-1).any()
+        self.assertFalse(bool(center))
+
+    def test_recommend_lr_tokens_full_disables_cap(self):
+        old = os.environ.get("TRELLIS_LR_TOKENS")
+        os.environ["TRELLIS_LR_TOKENS"] = "full"
+        try:
+            self.assertIsNone(offload.recommend_lr_tokens())
+        finally:
+            if old is None:
+                os.environ.pop("TRELLIS_LR_TOKENS", None)
+            else:
+                os.environ["TRELLIS_LR_TOKENS"] = old
+
     def test_cap_sparse_coords_reduces_dense_volume(self):
         xs = torch.arange(8)
         grid = torch.stack(torch.meshgrid(xs, xs, xs, indexing="ij"), dim=-1).reshape(-1, 3)

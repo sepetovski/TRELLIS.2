@@ -127,35 +127,33 @@ class Trellis2TexturingPipeline(Pipeline):
         """
         Preprocess the input image.
         """
-        # if has alpha channel, use it directly; otherwise, remove background
-        has_alpha = False
-        if input.mode == 'RGBA':
-            alpha = np.array(input)[:, :, 3]
-            if not np.all(alpha == 255):
-                has_alpha = True
+        from trellis2.utils.cutout import (
+            composite_on_black,
+            composite_original,
+            is_isolated_cutout,
+            refine_foreground,
+            subject_fraction,
+        )
+
         max_size = max(input.size)
         scale = min(1, 1024 / max_size)
         if scale < 1:
             input = input.resize((int(input.width * scale), int(input.height * scale)), Image.Resampling.LANCZOS)
-        if has_alpha:
-            output = input
-        else:
-            input = input.convert('RGB')
-            with self._model_on_device(self.rembg_model):
-                output = self.rembg_model(input)
-        output_np = np.array(output)
-        alpha = output_np[:, :, 3]
-        bbox = np.argwhere(alpha > 0.8 * 255)
-        bbox = np.min(bbox[:, 1]), np.min(bbox[:, 0]), np.max(bbox[:, 1]), np.max(bbox[:, 0])
-        center = (bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2
-        size = max(bbox[2] - bbox[0], bbox[3] - bbox[1])
-        size = int(size * 1)
-        bbox = center[0] - size // 2, center[1] - size // 2, center[0] + size // 2, center[1] + size // 2
-        output = output.crop(bbox)  # type: ignore
-        output = np.array(output).astype(np.float32) / 255
-        output = output[:, :, :3] * output[:, :, 3:4]
-        output = Image.fromarray((output * 255).astype(np.uint8))
-        return output
+        rgba = np.array(input.convert("RGBA"))
+        rgb = rgba[:, :, :3]
+        alpha = rgba[:, :, 3]
+        if is_isolated_cutout(alpha):
+            return composite_original(rgb, alpha)
+        input_rgb = Image.fromarray(rgb)
+        with self._model_on_device(self.rembg_model):
+            output = self.rembg_model(input_rgb)
+        rgba = np.array(output.convert("RGBA"))
+        rgb = rgba[:, :, :3]
+        alpha = rgba[:, :, 3]
+        if subject_fraction(alpha) < 0.12:
+            rgb, alpha, _note = refine_foreground(rgb, alpha)
+            return composite_on_black(rgb, alpha)
+        return composite_original(rgb, alpha)
         
     def get_cond(self, image: Union[torch.Tensor, list[Image.Image]], resolution: int, include_neg_cond: bool = True) -> dict:
         """

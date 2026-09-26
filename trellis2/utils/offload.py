@@ -74,11 +74,16 @@ def recommend_lr_tokens() -> Optional[int]:
     """
     Occupied-voxel cap for the 512 shape-SLat pass.
 
-    `T.png` is a sparse letter; a photo of a house fills most of the 32³
-    occupancy grid and the 4 GB card dies on the first shape-SLat step
-    (`device not ready` in attention RMSNorm). Override with TRELLIS_LR_TOKENS.
+    `T.png` is a few thousand voxels and is never capped. On a 4 GB card
+    the shape-SLat MLP dies with `device not ready` once occupancy gets
+    too dense: 3783 voxels (fairy) finished, 6712 (house2) died on step 0.
+    The cap stays at 4096. Interior voxels are dropped before the shell is
+    thinned. Override with TRELLIS_LR_TOKENS (a count, or `full` to keep
+    every voxel — that can TDR the card).
     """
-    env = os.environ.get("TRELLIS_LR_TOKENS", "").strip()
+    env = os.environ.get("TRELLIS_LR_TOKENS", "").strip().lower()
+    if env in ("full", "off", "none"):
+        return None
     if env:
         return int(env)
     total = gpu_total_memory_gb()
@@ -100,6 +105,79 @@ def recommend_sequential_cfg() -> bool:
     """
     env = os.environ.get("TRELLIS_SEQ_CFG", "").strip().lower()
     return env in ("1", "true", "yes")
+
+
+# Shape VAE conv at 1,988,316 voxels finished on a 4 GB card. The texture
+# VAE runs the same conv afterwards, while the mesh is still resident, and
+# dies in the flex_gemm neighbor map (`device not ready`). Stay under that
+# peak. 449,867 parents still all keep a child; extra children fill the rest.
+TEX_DECODE_VOXEL_CAP = 1_500_000
+
+
+def recommend_tex_decode_voxels() -> Optional[int]:
+    """
+    Max children the texture VAE may spawn in one upsample on a small GPU.
+
+    None means keep every positive subdivision logit. Override with
+    TRELLIS_TEX_VOXELS (a count, or `full` to disable).
+    """
+    env = os.environ.get("TRELLIS_TEX_VOXELS", "").strip().lower()
+    if env in ("full", "off", "none"):
+        return None
+    if env:
+        return int(env)
+    total = gpu_total_memory_gb()
+    if total > 0 and total < 6:
+        return TEX_DECODE_VOXEL_CAP
+    return None
+
+
+def limit_subdiv_feats(feats: torch.Tensor, max_out: Optional[int]) -> torch.Tensor:
+    """
+    Thin [N, 8] subdivision logits so at most `max_out` children stay positive.
+
+    Each row is one parent voxel and each column is one of 8 children.
+    SparseChannel2Spatial keeps children with logit > 0. When that would
+    exceed `max_out`, keep the strongest child of as many parents as possible,
+    then spend the rest of the budget on the next-highest positive logits.
+    """
+    if feats is None or max_out is None or max_out < 0:
+        return feats
+    if feats.ndim != 2 or feats.shape[0] == 0 or feats.shape[-1] == 0:
+        return feats
+    if not feats.is_floating_point():
+        return feats
+    positive = feats > 0
+    n_pos = int(positive.sum().item())
+    if n_pos <= max_out:
+        return feats
+    if max_out == 0:
+        return feats.masked_fill(positive, 0)
+
+    masked = feats.masked_fill(~positive, float("-inf"))
+    best_logit, best_idx = masked.max(dim=-1)
+    has_child = torch.isfinite(best_logit)
+    n_parents = int(has_child.sum().item())
+    keep = torch.zeros_like(positive)
+    if n_parents <= max_out:
+        parent_rows = has_child.nonzero(as_tuple=False).flatten()
+        keep[parent_rows, best_idx[parent_rows]] = True
+        budget = max_out - n_parents
+        if budget > 0:
+            rest = positive & ~keep
+            n_rest = int(rest.sum().item())
+            if n_rest > 0:
+                rest_logits = feats.masked_fill(~rest, float("-inf")).reshape(-1)
+                k = min(budget, n_rest)
+                flat = torch.topk(rest_logits, k, largest=True, sorted=False).indices
+                keep.view(-1)[flat] = True
+    else:
+        parent_score = best_logit.masked_fill(~has_child, float("-inf"))
+        top_parents = torch.topk(parent_score, max_out, largest=True, sorted=False).indices
+        keep[top_parents, best_idx[top_parents]] = True
+
+    drop = positive & ~keep
+    return feats.masked_fill(drop, 0)
 
 
 def recommend_upsample_voxels() -> Optional[int]:
@@ -144,9 +222,40 @@ def dilate_occupancy_coords(coords: torch.Tensor, factor: int = 2) -> torch.Tens
     return torch.cat([batch, xyz], dim=1).contiguous()
 
 
+def _drop_interior_voxels(coords: torch.Tensor) -> torch.Tensor:
+    """Drop voxels whose six face neighbors are also occupied. The shell stays."""
+    if coords.shape[0] < 64:
+        return coords
+    xyz = coords[:, 1:].detach().cpu().tolist()
+    occupied = set(map(tuple, xyz))
+    keep = []
+    for index, point in enumerate(xyz):
+        x, y, z = point
+        interior = (
+            (x + 1, y, z) in occupied and (x - 1, y, z) in occupied
+            and (x, y + 1, z) in occupied and (x, y - 1, z) in occupied
+            and (x, y, z + 1) in occupied and (x, y, z - 1) in occupied
+        )
+        if not interior:
+            keep.append(index)
+    if len(keep) == coords.shape[0]:
+        return coords
+    index = torch.tensor(keep, dtype=torch.long, device=coords.device)
+    return coords.index_select(0, index)
+
+
 def cap_sparse_coords(coords: torch.Tensor, max_tokens: int) -> torch.Tensor:
     """Keep at most `max_tokens` occupancy voxels while covering the same volume."""
     if coords is None or max_tokens is None or coords.shape[0] <= max_tokens:
+        return coords
+    peeled = _drop_interior_voxels(coords)
+    if peeled.shape[0] < coords.shape[0]:
+        print(
+            f"[TRELLIS.2] Dropped {coords.shape[0] - peeled.shape[0]} interior "
+            f"voxels, {peeled.shape[0]} left on the shell."
+        )
+        coords = peeled
+    if coords.shape[0] <= max_tokens:
         return coords
     batch = coords[:, :1]
     xyz = coords[:, 1:]

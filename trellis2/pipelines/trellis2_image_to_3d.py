@@ -11,6 +11,19 @@ from ..representations import Mesh, MeshWithVoxel
 from ..utils import offload
 
 
+def _park_off_gpu(obj):
+    """Drop CUDA caches and move a mesh or sparse tensor to CPU."""
+    if obj is None:
+        return obj
+    if hasattr(obj, "clear_spatial_cache"):
+        obj.clear_spatial_cache()
+    if hasattr(obj, "cpu"):
+        obj = obj.cpu()
+    if hasattr(obj, "clear_spatial_cache"):
+        obj.clear_spatial_cache()
+    return obj
+
+
 class Trellis2ImageTo3DPipeline(Pipeline):
     """
     Pipeline for inferring Trellis2 image-to-3D models.
@@ -174,42 +187,53 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         """
         Preprocess the input image.
         """
-        # if has alpha channel, use it directly; otherwise, remove background
-        has_alpha = False
-        if input.mode == 'RGBA':
-            alpha = np.array(input)[:, :, 3]
-            if not np.all(alpha == 255):
-                has_alpha = True
+        from trellis2.utils.cutout import (
+            composite_on_black,
+            composite_original,
+            is_isolated_cutout,
+            refine_foreground,
+            subject_fraction,
+        )
+
         max_size = max(input.size)
         scale = min(1, 1024 / max_size)
         if scale < 1:
             input = input.resize((int(input.width * scale), int(input.height * scale)), Image.Resampling.LANCZOS)
-        if has_alpha:
-            output = input
+        rgba = np.array(input.convert("RGBA"))
+        rgb = rgba[:, :, :3]
+        alpha = rgba[:, :, 3]
+        # A real cutout (T.png) is fed through unchanged. Rewriting its edge
+        # is what made later runs softer than the first one.
+        if is_isolated_cutout(alpha):
+            print("[TRELLIS.2] Existing cutout kept unchanged.")
+            image = composite_original(rgb, alpha)
         else:
-            input = input.convert('RGB')
+            print("[TRELLIS.2] Photo is not cut out. Removing the background.")
             self._ensure_rembg()
             # BiRefNet at 1024² does not fit a 4 GB card. Keep it on CPU.
             if self.low_vram:
                 print("[TRELLIS.2] Removing background on CPU (slow, but safe on 4 GB).")
                 self.rembg_model.cpu()
-                output = self.rembg_model(input)
+                output = self.rembg_model(Image.fromarray(rgb))
             else:
                 with self._model_on_device(self.rembg_model):
-                    output = self.rembg_model(input)
-        output_np = np.array(output)
-        alpha = output_np[:, :, 3]
-        bbox = np.argwhere(alpha > 0.8 * 255)
-        bbox = np.min(bbox[:, 1]), np.min(bbox[:, 0]), np.max(bbox[:, 1]), np.max(bbox[:, 0])
-        center = (bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2
-        size = max(bbox[2] - bbox[0], bbox[3] - bbox[1])
-        size = int(size * 1)
-        bbox = center[0] - size // 2, center[1] - size // 2, center[0] + size // 2, center[1] + size // 2
-        output = output.crop(bbox)  # type: ignore
-        output = np.array(output).astype(np.float32) / 255
-        output = output[:, :, :3] * output[:, :, 3:4]
-        output = Image.fromarray((output * 255).astype(np.uint8))
-        return output
+                    output = self.rembg_model(Image.fromarray(rgb))
+            rgba = np.array(output.convert("RGBA"))
+            rgb = rgba[:, :, :3]
+            alpha = rgba[:, :, 3]
+            if subject_fraction(alpha) < 0.12:
+                rgb, alpha, note = refine_foreground(rgb, alpha)
+                print(f"[TRELLIS.2] {note}")
+                image = composite_on_black(rgb, alpha)
+            else:
+                frac = subject_fraction(alpha)
+                print(f"[TRELLIS.2] Background removed ({frac:.0%} of the photo). Mask kept as-is.")
+                image = composite_original(rgb, alpha)
+        cutout_path = getattr(self, "cutout_save_path", None)
+        if cutout_path:
+            image.save(cutout_path)
+            print(f"[TRELLIS.2] Wrote model input {cutout_path}")
+        return image
         
     def get_cond(self, image: Union[torch.Tensor, list[Image.Image]], resolution: int, include_neg_cond: bool = True) -> dict:
         """
@@ -551,6 +575,16 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         meshes, subs = self.decode_shape_slat(shape_slat, resolution)
         if self.low_vram:
             self.drop_models("shape_slat_decoder")
+            # Shape conv at ~2M voxels fits. Texture runs the same conv next,
+            # and the mesh plus subdiv maps still sitting on the GPU are what
+            # push the neighbor map into `device not ready`.
+            if hasattr(shape_slat, "clear_spatial_cache"):
+                shape_slat.clear_spatial_cache()
+            if hasattr(shape_slat, "cpu"):
+                shape_slat = shape_slat.cpu()
+            meshes = [_park_off_gpu(m) for m in meshes]
+            subs = [_park_off_gpu(s) for s in subs]
+            offload.release_cuda_memory()
             if parked_tex is not None:
                 tex_slat = parked_tex.to(self.device)
         tex_voxels = self.decode_tex_slat(tex_slat, subs)
@@ -668,8 +702,9 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         if lr_cap and coords.shape[0] > lr_cap:
             print(
                 f"[TRELLIS.2] {coords.shape[0]} occupied voxels is too many for "
-                f"{gpu_gb:.1f} GB VRAM (a house photo is denser than T.png). "
-                f"Keeping {lr_cap} tokens. Override with TRELLIS_LR_TOKENS."
+                f"{gpu_gb:.1f} GB. Shape-SLat dies around 6700 tokens on 4 GB "
+                f"(device not ready in GELU). Keeping {lr_cap}. "
+                f"Override with TRELLIS_LR_TOKENS."
             )
             coords = offload.cap_sparse_coords(coords, lr_cap)
         if self.low_vram:
