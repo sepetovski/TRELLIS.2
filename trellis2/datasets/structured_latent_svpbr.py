@@ -4,13 +4,13 @@ import json
 from typing import *
 import numpy as np
 import torch
-import cv2
 from .. import models
 from .components import StandardDatasetBase, ImageConditionedMixin
 from ..modules.sparse import SparseTensor, sparse_cat
 from ..representations import MeshWithVoxel
 from ..renderers import PbrMeshRenderer, EnvMap
 from ..utils.data_utils import load_balanced_group_indices
+from ..utils.hdri import read_exr
 from ..utils.render_utils import yaw_pitch_r_fov_to_extrinsics_intrinsics
 
 
@@ -111,7 +111,7 @@ class SLatPbrVisMixin:
         renderer.rendering_options.ssaa = 2
         renderer.rendering_options.peel_layers = 8
         envmap = EnvMap(torch.tensor(
-            cv2.cvtColor(cv2.imread('assets/hdri/forest.exr', cv2.IMREAD_UNCHANGED), cv2.COLOR_BGR2RGB),
+            read_exr('assets/hdri/forest.exr'),
             dtype=torch.float32, device='cuda'
         ))
         

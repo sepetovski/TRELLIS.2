@@ -1,11 +1,10 @@
-import gradio as gr
-
 import os
 os.environ['OPENCV_IO_ENABLE_OPENEXR'] = '1'
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+
+import gradio as gr
 from datetime import datetime
 import shutil
-import cv2
 from typing import *
 import torch
 import numpy as np
@@ -16,6 +15,7 @@ from trellis2.modules.sparse import SparseTensor
 from trellis2.pipelines import Trellis2ImageTo3DPipeline
 from trellis2.renderers import EnvMap
 from trellis2.utils import render_utils
+from trellis2.utils.hdri import read_exr
 import o_voxel
 
 
@@ -624,22 +624,19 @@ if __name__ == "__main__":
         icon = Image.open(MODES[i]['icon'])
         MODES[i]['icon_base64'] = image_to_base64(icon)
 
+    # Read HDRIs before the checkpoint download. OpenCV 5 has no OpenEXR codec,
+    # and failing here avoids a crash after the model is already on the GPU.
+    hdri = {
+        name: read_exr(f'assets/hdri/{name}.exr')
+        for name in ('forest', 'sunset', 'courtyard')
+    }
+
     pipeline = Trellis2ImageTo3DPipeline.from_pretrained('microsoft/TRELLIS.2-4B')
     pipeline.cuda()
     
     envmap = {
-        'forest': EnvMap(torch.tensor(
-            cv2.cvtColor(cv2.imread('assets/hdri/forest.exr', cv2.IMREAD_UNCHANGED), cv2.COLOR_BGR2RGB),
-            dtype=torch.float32, device='cuda'
-        )),
-        'sunset': EnvMap(torch.tensor(
-            cv2.cvtColor(cv2.imread('assets/hdri/sunset.exr', cv2.IMREAD_UNCHANGED), cv2.COLOR_BGR2RGB),
-            dtype=torch.float32, device='cuda'
-        )),
-        'courtyard': EnvMap(torch.tensor(
-            cv2.cvtColor(cv2.imread('assets/hdri/courtyard.exr', cv2.IMREAD_UNCHANGED), cv2.COLOR_BGR2RGB),
-            dtype=torch.float32, device='cuda'
-        )),
+        name: EnvMap(torch.tensor(image, dtype=torch.float32, device='cuda'))
+        for name, image in hdri.items()
     }
     
     demo.launch(css=css, head=head)
