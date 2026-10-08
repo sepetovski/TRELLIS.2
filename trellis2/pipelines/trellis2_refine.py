@@ -33,6 +33,7 @@ from ..utils.glb_inspect import (
     retarget_mesh,
 )
 from ..utils.refine_ops import (
+    batch_coords,
     faces_to_latent_mask,
     gather_feats_by_coord,
     row_index_after_cap,
@@ -294,7 +295,10 @@ class Trellis2RefinePipeline(Trellis2TexturingPipeline):
         if guide_subs is not None:
             guides = []
             for coords, feats in guide_subs:
-                guide = SparseTensor(feats=feats.float().contiguous(), coords=coords.long().contiguous())
+                guide = SparseTensor(
+                    feats=feats.float().contiguous(),
+                    coords=coords.to(dtype=torch.int32).contiguous(),
+                )
                 if not small:
                     guide = guide.to(slat.device)
                 guides.append(guide)
@@ -386,10 +390,7 @@ class Trellis2RefinePipeline(Trellis2TexturingPipeline):
         return encoded, found
 
     def _encode_shape(self, voxel_xyz: torch.Tensor, dual_vertices: torch.Tensor, intersected: torch.Tensor) -> SparseTensor:
-        coords = torch.cat(
-            [torch.zeros(voxel_xyz.shape[0], 1, dtype=torch.long), voxel_xyz.long()],
-            dim=1,
-        )
+        coords = batch_coords(voxel_xyz)
         feats = dual_vertices.float() * self.RESOLUTION - voxel_xyz.float()
         incoming = SparseTensor(feats=feats.contiguous(), coords=coords.contiguous())
         flags = incoming.replace(intersected.to(dtype=torch.float32).contiguous())
@@ -402,7 +403,7 @@ class Trellis2RefinePipeline(Trellis2TexturingPipeline):
         return latent
 
     def _encode_texture(self, voxel_xyz: torch.Tensor, pbr: torch.Tensor) -> SparseTensor:
-        coords = torch.cat([torch.zeros(voxel_xyz.shape[0], 1, dtype=torch.long), voxel_xyz.long()], dim=1)
+        coords = batch_coords(voxel_xyz)
         incoming = SparseTensor(feats=pbr.float().contiguous(), coords=coords.contiguous())
         print(f"[refine] encoding texture ({incoming.coords.shape[0]} voxels)")
         encoder = self.models["tex_slat_encoder"]

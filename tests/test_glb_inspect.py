@@ -9,6 +9,7 @@ from PIL import Image
 from trellis2.utils.glb_inspect import (
     apply_trellis_frame,
     format_report,
+    restore_glb_axes,
     inspect_glb,
     inspect_mesh,
     load_glb_meshes,
@@ -129,6 +130,19 @@ class InspectTests(unittest.TestCase):
         self.assertEqual(len(retargeted.visual.uv), len(retargeted.vertices))
         framed = apply_trellis_frame(mesh.vertices, center, scale)
         np.testing.assert_allclose(retargeted.vertices, framed)
+
+    def test_restore_glb_axes_copies_readonly_normals(self):
+        raw = np.array([[1.0, 2.0, 3.0], [0.0, -4.0, 5.0]])
+        framed = apply_trellis_frame(raw, np.zeros(3), 1.0)
+        normals = np.array([[0.0, 1.0, 0.0], [0.0, 0.0, 1.0]])
+        normals.setflags(write=False)
+        framed.setflags(write=False)
+        out_v, out_n = restore_glb_axes(framed, normals)
+        np.testing.assert_allclose(out_v, raw)
+        np.testing.assert_allclose(out_n, [[0.0, 0.0, -1.0], [0.0, 1.0, 0.0]])
+        self.assertEqual(normals.tolist(), [[0.0, 1.0, 0.0], [0.0, 0.0, 1.0]])
+        self.assertFalse(normals.flags.writeable)
+        self.assertTrue(out_n.flags.writeable)
 
 
 if __name__ == "__main__":

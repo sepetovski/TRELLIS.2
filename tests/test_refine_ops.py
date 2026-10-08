@@ -3,6 +3,7 @@ import unittest
 import torch
 
 from trellis2.utils.refine_ops import (
+    batch_coords,
     faces_to_latent_mask,
     gather_feats_by_coord,
     row_index_after_cap,
@@ -12,6 +13,12 @@ from trellis2.utils.refine_ops import (
 
 
 class RefineOpsTests(unittest.TestCase):
+    def test_batch_coords_are_int32(self):
+        xyz = torch.tensor([[0, 1, 2], [400, 0, 511]], dtype=torch.int64)
+        coords = batch_coords(xyz)
+        self.assertEqual(coords.dtype, torch.int32)
+        self.assertEqual(coords.tolist(), [[0, 0, 1, 2], [0, 400, 0, 511]])
+
     def test_gather_matches_and_fills(self):
         src = torch.tensor([[0, 0, 0], [2, 0, 0], [2, 0, 0]])
         feats = torch.tensor([[1.0, 2.0], [3.0, 4.0], [9.0, 9.0]])

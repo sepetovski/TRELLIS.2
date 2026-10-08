@@ -11,6 +11,20 @@ from typing import Optional, Tuple
 import torch
 
 
+def batch_coords(xyz: torch.Tensor) -> torch.Tensor:
+    """[N, 4] batch + xyz coordinates as int32.
+
+    flex_gemm sparse conv rejects every other integer dtype. CPU matching can
+    keep using int64; the tensor that enters the encoder cannot.
+    """
+    xyz = torch.as_tensor(xyz)
+    if xyz.ndim != 2 or xyz.shape[-1] != 3:
+        raise ValueError(f"xyz must be [N, 3], got {tuple(xyz.shape)}")
+    xyz = xyz.to(dtype=torch.int32).contiguous()
+    batch = torch.zeros((xyz.shape[0], 1), dtype=torch.int32)
+    return torch.cat([batch, xyz], dim=1)
+
+
 def xyz_of(coords: torch.Tensor) -> torch.Tensor:
     coords = torch.as_tensor(coords).long()
     if coords.ndim != 2 or coords.shape[-1] not in (3, 4):

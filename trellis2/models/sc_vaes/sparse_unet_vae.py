@@ -324,6 +324,9 @@ class SparseUnetVaeEncoder(nn.Module):
         self.num_blocks = num_blocks
         self.dtype = torch.float16 if use_fp16 else torch.float32
         self.dtype = torch.float16 if use_fp16 else torch.float32
+        # stage_model only flips this when the attribute exists. Without it,
+        # VAE stage offload leaves every resolution level on CPU.
+        self.low_vram = False
 
         self.input_layer = sp.SparseLinear(in_channels, model_channels[0])
         self.to_latent = sp.SparseLinear(model_channels[-1], 2 * latent_channels)
@@ -379,15 +382,54 @@ class SparseUnetVaeEncoder(nn.Module):
                     nn.init.constant_(module.bias, 0)
         self.apply(_basic_init)
 
+    def _run_encoder_stage(self, i, res, h):
+        """Run one resolution level, streaming its weights when low_vram is set.
+
+        The encoder's first level is the full voxel grid. Leaving that level
+        on CPU (VAE stage offload) crashes LayerNorm: features are CUDA, weights are not.
+        """
+        device = h.device
+        for block in res:
+            if self.low_vram:
+                block.to(device)
+            h = block(h)
+            if self.low_vram:
+                block.cpu()
+                # Early levels still hold most of the voxels. Return the
+                # finished block's weight memory before the next conv.
+                if i < 2 and torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+        return h
+
     def forward(self, x: sp.SparseTensor, sample_posterior=False, return_raw=False):
+        # flex_gemm's neighbor map asserts coords are int32. Callers that build
+        # the grid with torch.long (int64) die on the first sparse conv.
+        if x.coords.dtype != torch.int32:
+            x = x.replace(x.feats, x.coords.to(dtype=torch.int32).contiguous())
+        device = x.device
+        if self.low_vram:
+            self.input_layer.to(device)
         h = self.input_layer(x)
+        if self.low_vram:
+            self.input_layer.cpu()
         h = h.type(self.dtype)
         for i, res in enumerate(self.blocks):
-            for j, block in enumerate(res):
-                h = block(h)
+            if self.low_vram:
+                n_vox = int(h.coords.shape[0]) if hasattr(h, "coords") else -1
+                print(f"[TRELLIS.2] VAE encode level {i + 1}/{len(self.blocks)} ({n_vox} voxels)")
+            h = self._run_encoder_stage(i, res, h)
+            if self.low_vram:
+                if hasattr(h, "clear_spatial_cache"):
+                    h.clear_spatial_cache()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
         h = h.type(x.dtype)
         h = h.replace(F.layer_norm(h.feats, h.feats.shape[-1:]))
+        if self.low_vram:
+            self.to_latent.to(device)
         h = self.to_latent(h)
+        if self.low_vram:
+            self.to_latent.cpu()
         
         # Sample from the posterior distribution
         mean, logvar = h.feats.chunk(2, dim=-1)

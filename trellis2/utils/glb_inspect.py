@@ -91,6 +91,19 @@ def apply_trellis_frame(vertices: np.ndarray, center: np.ndarray, scale: float) 
     return swapped
 
 
+def restore_glb_axes(vertices: np.ndarray, normals: np.ndarray):
+    """Undo the Y/Z swap before writing a GLB.
+
+    Copies both arrays first. ``Trimesh.vertex_normals`` is a read-only cache,
+    and writing the swap into it raises ``assignment destination is read-only``.
+    """
+    out_v = np.array(np.asarray(vertices), copy=True)
+    out_n = np.array(np.asarray(normals), copy=True)
+    out_v[:, 1], out_v[:, 2] = out_v[:, 2], -out_v[:, 1]
+    out_n[:, 1], out_n[:, 2] = out_n[:, 2], -out_n[:, 1]
+    return out_v, out_n
+
+
 def retarget_mesh(mesh: trimesh.Trimesh, center: np.ndarray, scale: float) -> trimesh.Trimesh:
     """Normalize vertices. UVs and material stay attached."""
     vertices = apply_trellis_frame(mesh.vertices, center, scale)
