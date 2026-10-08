@@ -1,5 +1,6 @@
 import os
 import unittest
+import unittest.mock
 
 import torch
 import torch.nn as nn
@@ -101,6 +102,48 @@ class OffloadTests(unittest.TestCase):
         self.assertTrue(offload.is_nested_block_model(nested))
         self.assertFalse(offload.should_dit_block_offload(nested))
         self.assertFalse(offload.is_nested_block_model(TinyDiT()))
+
+    def test_should_downgrade_explicit_cascade_on_small_gpu(self):
+        old = os.environ.get("TRELLIS_ALLOW_HIGH_RES")
+        os.environ.pop("TRELLIS_ALLOW_HIGH_RES", None)
+        try:
+            with unittest.mock.patch.object(offload, "gpu_total_memory_gb", return_value=4.0):
+                self.assertTrue(offload.should_downgrade_pipeline("1024_cascade"))
+                self.assertTrue(offload.should_downgrade_pipeline("1024"))
+                self.assertTrue(offload.should_downgrade_pipeline("1536_cascade"))
+                self.assertFalse(offload.should_downgrade_pipeline("512"))
+            with unittest.mock.patch.object(offload, "gpu_total_memory_gb", return_value=24.0):
+                self.assertFalse(offload.should_downgrade_pipeline("1024_cascade"))
+            os.environ["TRELLIS_ALLOW_HIGH_RES"] = "1"
+            with unittest.mock.patch.object(offload, "gpu_total_memory_gb", return_value=4.0):
+                self.assertFalse(offload.should_downgrade_pipeline("1024_cascade"))
+        finally:
+            if old is None:
+                os.environ.pop("TRELLIS_ALLOW_HIGH_RES", None)
+            else:
+                os.environ["TRELLIS_ALLOW_HIGH_RES"] = old
+
+    def test_recommend_shape_decode_voxels(self):
+        old = os.environ.get("TRELLIS_SHAPE_VOXELS")
+        try:
+            os.environ["TRELLIS_SHAPE_VOXELS"] = "full"
+            self.assertIsNone(offload.recommend_shape_decode_voxels(256))
+            os.environ["TRELLIS_SHAPE_VOXELS"] = "1000"
+            self.assertEqual(offload.recommend_shape_decode_voxels(256), 1000)
+            os.environ.pop("TRELLIS_SHAPE_VOXELS", None)
+            with unittest.mock.patch.object(offload, "gpu_total_memory_gb", return_value=4.0):
+                cap_256 = offload.recommend_shape_decode_voxels(256)
+                cap_512 = offload.recommend_shape_decode_voxels(512)
+            self.assertEqual(cap_256, offload.SHAPE_DECODE_VOXEL_CHANNEL_BUDGET // 256)
+            self.assertLess(cap_256, 822_509)
+            self.assertGreaterEqual(cap_512, 124_234)
+            with unittest.mock.patch.object(offload, "gpu_total_memory_gb", return_value=24.0):
+                self.assertIsNone(offload.recommend_shape_decode_voxels(256))
+        finally:
+            if old is None:
+                os.environ.pop("TRELLIS_SHAPE_VOXELS", None)
+            else:
+                os.environ["TRELLIS_SHAPE_VOXELS"] = old
 
     def test_recommend_lr_tokens_env(self):
         old = os.environ.get("TRELLIS_LR_TOKENS")

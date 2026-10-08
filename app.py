@@ -15,7 +15,7 @@ import io
 from trellis2.modules.sparse import SparseTensor
 from trellis2.pipelines import Trellis2ImageTo3DPipeline
 from trellis2.renderers import EnvMap
-from trellis2.utils import render_utils
+from trellis2.utils import offload, render_utils
 import o_voxel
 
 
@@ -525,7 +525,17 @@ with gr.Blocks(delete_cache=(600, 600)) as demo:
         with gr.Column(scale=1, min_width=360):
             image_prompt = gr.Image(label="Image Prompt", format="png", image_mode="RGBA", type="pil", height=400)
             
-            resolution = gr.Radio(["512", "1024", "1536"], label="Resolution", value="1024")
+            _small_gpu = offload.recommend_pipeline_type() == "512"
+            resolution = gr.Radio(
+                ["512", "1024", "1536"],
+                label="Resolution",
+                value="512" if _small_gpu else "1024",
+            )
+            if _small_gpu:
+                gr.Markdown(
+                    "GPUs under 8 GB stay on **512**. Choosing 1024 or 1536 is redirected "
+                    "there so shape decode can finish. Set `TRELLIS_ALLOW_HIGH_RES=1` to keep a higher cascade."
+                )
             seed = gr.Slider(0, MAX_SEED, label="Seed", value=0, step=1)
             randomize_seed = gr.Checkbox(label="Randomize Seed", value=True)
             decimation_target = gr.Slider(100000, 1000000, label="Decimation Target", value=500000, step=10000)

@@ -9,7 +9,9 @@ tokens in the 1024 DiT). This script still *requests* pipeline_type
 token count is too high, TRELLIS.2 lowers resolution 128 at a time until
 it fits `max_num_tokens`, but not below `min_hr_resolution` (default 1024).
 
-So you may get 1536, 1408, …, or 1024 — not a silent fall-back to 512.
+So you may get 1536, 1408, …, or 1024. This script sets
+TRELLIS_ALLOW_HIGH_RES=1 so pipeline.run() does not redirect it to 512
+(the Gradio app does that redirect on GPUs under 8 GB).
 On 4 GB the 4-level VAE coord upsample is skipped (it TDRs); occupancy is
 integer-scaled and the 1024 DiT still runs. After `device not ready`:
 
@@ -31,6 +33,9 @@ import sys
 
 os.environ["OPENCV_IO_ENABLE_OPENEXR"] = "1"
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True,max_split_size_mb:128"
+# pipeline.run() sends <8 GB cards to 512 unless this is set. This script
+# is the explicit opt-in; app.py is not.
+os.environ.setdefault("TRELLIS_ALLOW_HIGH_RES", "1")
 
 import imageio
 from PIL import Image

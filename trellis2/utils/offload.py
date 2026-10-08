@@ -70,6 +70,29 @@ def recommend_pipeline_type(threshold_gb: float = 8.0) -> Optional[str]:
     return None
 
 
+_HIGH_RES_PIPELINES = ("1024", "1024_cascade", "1536_cascade")
+
+
+def allow_high_res_pipeline() -> bool:
+    """Keep a requested 1024/1536 cascade on a GPU under 8 GB.
+
+    The Gradio demo always passes a pipeline type, so treating that as an
+    override skipped the 512 guard and the shape decoder TDRed.
+    Set TRELLIS_ALLOW_HIGH_RES=1 to opt in (example_1536.py does).
+    """
+    env = os.environ.get("TRELLIS_ALLOW_HIGH_RES", "").strip().lower()
+    return env in ("1", "true", "yes", "on")
+
+
+def should_downgrade_pipeline(pipeline_type: Optional[str]) -> bool:
+    """True when this cascade should run as 512 on the current GPU."""
+    if pipeline_type not in _HIGH_RES_PIPELINES:
+        return False
+    if allow_high_res_pipeline():
+        return False
+    return recommend_pipeline_type() == "512"
+
+
 def recommend_lr_tokens() -> Optional[int]:
     """
     Occupied-voxel cap for the 512 shape-SLat pass.
@@ -112,6 +135,32 @@ def recommend_sequential_cfg() -> bool:
 # dies in the flex_gemm neighbor map (`device not ready`). Stay under that
 # peak. 449,867 parents still all keep a child; extra children fill the rest.
 TEX_DECODE_VOXEL_CAP = 1_500_000
+
+
+# Largest wide ConvNeXt stage that finished on a 4 GB card: 124,234 voxels
+# at 512 channels. The next 1024-cascade stage, 822,509 voxels at 256
+# channels, died in SiLU with `device not ready`. Stay under that product.
+SHAPE_DECODE_VOXEL_CHANNEL_BUDGET = 125_000 * 512
+
+
+def recommend_shape_decode_voxels(out_channels: int) -> Optional[int]:
+    """Max children one shape-decoder upsample may spawn on a small GPU.
+
+    None keeps every positive subdivision logit. The cap scales with the
+    next stage's channel count, because the ConvNeXt MLP width is what
+    fills a 4 GB card. Override with TRELLIS_SHAPE_VOXELS (a count, or
+    `full` to disable).
+    """
+    env = os.environ.get("TRELLIS_SHAPE_VOXELS", "").strip().lower()
+    if env in ("full", "off", "none"):
+        return None
+    if env:
+        return int(env)
+    total = gpu_total_memory_gb()
+    if total <= 0 or total >= 6:
+        return None
+    channels = max(int(out_channels), 1)
+    return max(1, SHAPE_DECODE_VOXEL_CHANNEL_BUDGET // channels)
 
 
 def recommend_tex_decode_voxels() -> Optional[int]:
