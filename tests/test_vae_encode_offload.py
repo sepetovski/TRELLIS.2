@@ -133,6 +133,27 @@ class VaeEncodeOffloadTests(unittest.TestCase):
                 self.assertFalse(block.ready)
                 self.assertEqual(block.lin.weight.device.type, "cpu")
 
+    def test_int64_coords_are_cast_before_the_blocks(self):
+        encoder = _tiny_encoder()
+        x = _voxels()
+        long_coords = x.coords.to(dtype=torch.int64)
+        x = sp.SparseTensor(feats=x.feats, coords=long_coords)
+        seen = []
+        for res in encoder.blocks:
+            for block in res:
+                orig = block.forward
+
+                def wrapped(h, orig=orig):
+                    seen.append(h.coords.dtype)
+                    return orig(h)
+
+                block.forward = wrapped
+        latent = encoder(x)
+        self.assertTrue(seen)
+        self.assertTrue(all(dtype == torch.int32 for dtype in seen))
+        self.assertEqual(latent.coords.dtype, torch.int32)
+        self.assertEqual(latent.coords.tolist(), long_coords.to(dtype=torch.int32).tolist())
+
     def test_low_vram_matches_resident_encode(self):
         torch.manual_seed(0)
         resident = _tiny_encoder()

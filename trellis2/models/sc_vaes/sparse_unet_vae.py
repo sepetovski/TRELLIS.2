@@ -402,6 +402,10 @@ class SparseUnetVaeEncoder(nn.Module):
         return h
 
     def forward(self, x: sp.SparseTensor, sample_posterior=False, return_raw=False):
+        # flex_gemm's neighbor map asserts coords are int32. Callers that build
+        # the grid with torch.long (int64) die on the first sparse conv.
+        if x.coords.dtype != torch.int32:
+            x = x.replace(x.feats, x.coords.to(dtype=torch.int32).contiguous())
         device = x.device
         if self.low_vram:
             self.input_layer.to(device)
