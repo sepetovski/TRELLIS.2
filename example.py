@@ -1,18 +1,18 @@
 import os
 os.environ['OPENCV_IO_ENABLE_OPENEXR'] = '1'
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"  # Can save GPU memory
-import cv2
 import imageio
 from PIL import Image
 import torch
 from trellis2.pipelines import Trellis2ImageTo3DPipeline
 from trellis2.utils import render_utils
+from trellis2.utils.hdri import read_exr
 from trellis2.renderers import EnvMap
 import o_voxel
 
 # 1. Setup Environment Map
 envmap = EnvMap(torch.tensor(
-    cv2.cvtColor(cv2.imread('assets/hdri/forest.exr', cv2.IMREAD_UNCHANGED), cv2.COLOR_BGR2RGB),
+    read_exr('assets/hdri/forest.exr'),
     dtype=torch.float32, device='cuda'
 ))
 

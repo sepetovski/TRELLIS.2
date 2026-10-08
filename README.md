@@ -120,18 +120,18 @@ Here is an [example](example.py) of how to use the pretrained models for 3D asse
 import os
 os.environ['OPENCV_IO_ENABLE_OPENEXR'] = '1'
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"  # Can save GPU memory
-import cv2
 import imageio
 from PIL import Image
 import torch
 from trellis2.pipelines import Trellis2ImageTo3DPipeline
 from trellis2.utils import render_utils
+from trellis2.utils.hdri import read_exr
 from trellis2.renderers import EnvMap
 import o_voxel
 
 # 1. Setup Environment Map
 envmap = EnvMap(torch.tensor(
-    cv2.cvtColor(cv2.imread('assets/hdri/forest.exr', cv2.IMREAD_UNCHANGED), cv2.COLOR_BGR2RGB),
+    read_exr('assets/hdri/forest.exr'),
     dtype=torch.float32, device='cuda'
 ))
 
@@ -178,6 +178,13 @@ Upon execution, the script generates the following files:
 [app.py](app.py) provides a simple web demo for image to 3D asset generation. you can run the demo with the following command:
 ```sh
 python app.py
+```
+
+HDRI lighting is loaded from `assets/hdri/*.exr`. `opencv-python` 5.x wheels are built without OpenEXR, and `python app.py` then crashes in `cv2.cvtColor` because `cv2.imread` returns an empty image. `setup.sh` installs `opencv-python-headless>=4.10,<5`, which still includes the codec. An existing OpenCV 5 install can be fixed with either of:
+
+```sh
+pip install "opencv-python-headless>=4.10,<5"
+pip install OpenEXR
 ```
 
 Then, you can access the demo at the address shown in the terminal.

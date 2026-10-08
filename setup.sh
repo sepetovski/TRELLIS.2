@@ -77,7 +77,8 @@ if [ "$NEW_ENV" = true ] ; then
 fi
 
 if [ "$BASIC" = true ] ; then
-    pip install imageio imageio-ffmpeg tqdm easydict opencv-python-headless ninja trimesh transformers gradio==6.0.1 tensorboard pandas lpips zstandard
+    # opencv-python 5.x wheels ship without OpenEXR, so assets/hdri/*.exr fail to load.
+    pip install imageio imageio-ffmpeg tqdm easydict "opencv-python-headless>=4.10,<5" ninja trimesh transformers gradio==6.0.1 tensorboard pandas lpips zstandard
     pip install git+https://github.com/EasternJournalist/utils3d.git@9a4eb15e4021b67b12c460c7057d642626897ec8
     sudo apt install -y libjpeg-dev
     pip install pillow-simd
