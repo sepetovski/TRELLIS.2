@@ -391,7 +391,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         mean = torch.tensor(self.shape_slat_normalization['mean'])[None].to(slat.device)
         slat = slat * std + mean
         if self.low_vram and lr_key is not None:
-            self.drop_models(lr_key)
+            self.unload_models(lr_key)
             offload.log_host_memory("after LR shape SLat")
 
         # Upsample occupancy to the HR token grid. On 4 GB the 4-level VAE C2S
@@ -574,7 +574,9 @@ class Trellis2ImageTo3DPipeline(Pipeline):
             offload.release_cuda_memory()
         meshes, subs = self.decode_shape_slat(shape_slat, resolution)
         if self.low_vram:
-            self.drop_models("shape_slat_decoder")
+            # Extract GLB decodes these latents again. Unload frees the weights
+            # but keeps the checkpoint spec so the decoder can be loaded later.
+            self.unload_models("shape_slat_decoder")
             # Shape conv at ~2M voxels fits. Texture runs the same conv next,
             # and the mesh plus subdiv maps still sitting on the GPU are what
             # push the neighbor map into `device not ready`.
@@ -589,7 +591,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
                 tex_slat = parked_tex.to(self.device)
         tex_voxels = self.decode_tex_slat(tex_slat, subs)
         if self.low_vram:
-            self.drop_models("tex_slat_decoder")
+            self.unload_models("tex_slat_decoder")
         out_mesh = []
         for m, v in zip(meshes, tex_voxels):
             m.fill_holes()
@@ -708,20 +710,20 @@ class Trellis2ImageTo3DPipeline(Pipeline):
             )
             coords = offload.cap_sparse_coords(coords, lr_cap)
         if self.low_vram:
-            self.drop_models("sparse_structure_flow_model", "sparse_structure_decoder")
+            self.unload_models("sparse_structure_flow_model", "sparse_structure_decoder")
         if pipeline_type == '512':
             shape_slat = self.sample_shape_slat(
                 cond_512, self.models['shape_slat_flow_model_512'],
                 coords, shape_slat_sampler_params
             )
             if self.low_vram:
-                self.drop_models("shape_slat_flow_model_512")
+                self.unload_models("shape_slat_flow_model_512")
             tex_slat = self.sample_tex_slat(
                 cond_512, self.models['tex_slat_flow_model_512'],
                 shape_slat, tex_slat_sampler_params
             )
             if self.low_vram:
-                self.drop_models("tex_slat_flow_model_512")
+                self.unload_models("tex_slat_flow_model_512")
             res = 512
         elif pipeline_type == '1024':
             shape_slat = self.sample_shape_slat(
@@ -729,13 +731,13 @@ class Trellis2ImageTo3DPipeline(Pipeline):
                 coords, shape_slat_sampler_params
             )
             if self.low_vram:
-                self.drop_models("shape_slat_flow_model_1024")
+                self.unload_models("shape_slat_flow_model_1024")
             tex_slat = self.sample_tex_slat(
                 cond_1024, self.models['tex_slat_flow_model_1024'],
                 shape_slat, tex_slat_sampler_params
             )
             if self.low_vram:
-                self.drop_models("tex_slat_flow_model_1024")
+                self.unload_models("tex_slat_flow_model_1024")
             res = 1024
         elif pipeline_type == '1024_cascade':
             shape_slat, res = self.sample_shape_slat_cascade(
@@ -747,13 +749,13 @@ class Trellis2ImageTo3DPipeline(Pipeline):
                 min_hr_resolution,
             )
             if self.low_vram:
-                self.drop_models("shape_slat_flow_model_512", "shape_slat_flow_model_1024")
+                self.unload_models("shape_slat_flow_model_512", "shape_slat_flow_model_1024")
             tex_slat = self.sample_tex_slat(
                 cond_1024, self.models['tex_slat_flow_model_1024'],
                 shape_slat, tex_slat_sampler_params
             )
             if self.low_vram:
-                self.drop_models("tex_slat_flow_model_1024")
+                self.unload_models("tex_slat_flow_model_1024")
         elif pipeline_type == '1536_cascade':
             shape_slat, res = self.sample_shape_slat_cascade(
                 cond_512, cond_1024,
@@ -764,13 +766,13 @@ class Trellis2ImageTo3DPipeline(Pipeline):
                 min_hr_resolution,
             )
             if self.low_vram:
-                self.drop_models("shape_slat_flow_model_512", "shape_slat_flow_model_1024")
+                self.unload_models("shape_slat_flow_model_512", "shape_slat_flow_model_1024")
             tex_slat = self.sample_tex_slat(
                 cond_1024, self.models['tex_slat_flow_model_1024'],
                 shape_slat, tex_slat_sampler_params
             )
             if self.low_vram:
-                self.drop_models("tex_slat_flow_model_1024")
+                self.unload_models("tex_slat_flow_model_1024")
         if self.low_vram:
             del cond_512, cond_1024, coords
             print("[TRELLIS.2] Sampling finished; flow models freed before VAE decode.")

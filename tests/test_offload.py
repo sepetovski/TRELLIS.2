@@ -81,6 +81,13 @@ class OffloadTests(unittest.TestCase):
         self.assertIsNot(first, second)
         self.assertEqual(loads, ["dec", "dec"])
 
+    def test_drop_models_forgets_lazy_spec(self):
+        store = offload.LazyModelMap(lambda name, spec: TinyDiT(), {"dec": "spec"})
+        _ = store["dec"]
+        offload.drop_models(store, ["dec"])
+        with self.assertRaises(KeyError):
+            _ = store["dec"]
+
     def test_drop_models_removes_keys(self):
         store = {"a": TinyDiT(), "b": TinyDiT()}
         dropped = offload.drop_models(store, ["a", "missing"])
