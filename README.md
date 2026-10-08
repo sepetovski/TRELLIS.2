@@ -190,7 +190,7 @@ TRELLIS.2 is a **cascade of independently trained modules** (sparse-structure Di
 This repo now:
 
 1. **Streams transformer blocks CPU ↔ GPU one layer at a time** on GPUs ≤12 GB (`block_offload='auto'`).
-2. **Defaults `pipeline.run()` to `pipeline_type='512'`** on GPUs under 8 GB so the 1024 cascade is not used unless you pass it explicitly.
+2. **Runs `pipeline_type='512'`** on GPUs under 8 GB, including when the caller passes `1024_cascade` (the Gradio resolution control does). The 1024 shape decoder TDRs a 4 GB card around 800k voxels. Set `TRELLIS_ALLOW_HIGH_RES=1` to keep the requested cascade (`example_1536.py` does).
 3. **Skips loading unused 1024 checkpoints** when you pass `pipeline_type='512'` to `from_pretrained`.
 
 ```python
@@ -212,7 +212,7 @@ WSL notes:
 - `TdrDelay=60` in the Windows registry is still useful so a long kernel is not killed, but it will not create extra VRAM.
 - Live tracing: `TRELLIS_VRAM_LOG=1 python example_low_vram.py` and `watch -n 0.5 nvidia-smi`.
 - After a `device not ready` fault, CUDA stays dead until WSL is reset. A Windows reboot is not always enough. In PowerShell run `wsl --shutdown`, then reopen Ubuntu. A photo (house, person, car) occupies far more voxels than `T.png`; the 512 path now prints `Sparse structure occupied voxels` and caps them on GPUs under 6 GB (default 4096; 6712 voxels TDRs a 4 GB card in shape-SLat). `TRELLIS_LR_TOKENS=full` keeps every voxel.
-- The texture VAE's last upsample is the same sparse conv. On `toilet.png` the shape pass finished at 1,988,316 voxels, then texture died in the flex_gemm neighbor map while that mesh was still on the GPU. The mesh is moved to CPU before texture decode, and GPUs under 6 GB keep that upsample at or under 1,500,000 voxels. `TRELLIS_TEX_VOXELS=full` disables the cap.
+- The texture VAE's last upsample is the same sparse conv. On `toilet.png` the shape pass finished at 1,988,316 voxels, then texture died in the flex_gemm neighbor map while that mesh was still on the GPU. The mesh is moved to CPU before texture decode, and GPUs under 6 GB keep that upsample at or under 1,500,000 voxels. `TRELLIS_TEX_VOXELS=full` disables the cap. The shape decoder's own predicted subdivision is left intact: thinning those children disconnects the surface into dots.
 - A bare `Killed` (no Python traceback) is the **Linux OOM killer** — WSL ran out of *system RAM*, not VRAM. Each unused 1.3B DiT is now deleted after its stage. If it still dies, give WSL more RAM in `%UserProfile%\\.wslconfig` (`memory=16GB`, `swap=8GB`) and run `wsl --shutdown`.
 
 #### Experimental 1536³ cascade (`example_1536.py`)
@@ -223,7 +223,7 @@ WSL notes:
 python example_1536.py yourphoto.png
 ```
 
-This requests `pipeline_type='1536_cascade'` (512 shape SLat, then the 1024 DiT aimed at 1536). Full 1536³ still needs ~49k sparse tokens, which does not fit 4 GB. On GPUs under 8 GB the 4-level VAE coord upsample is skipped (it TDRs on a dragon-like shape); occupancy is integer-scaled and the 1024 DiT still runs. Tokens default to `TRELLIS_MAX_TOKENS=12288` with floor `TRELLIS_MIN_HR=1024`, so the result is 1024–1536, never a silent 512 fall-back. After `device not ready`, `wsl --shutdown` then retry with `TRELLIS_MAX_TOKENS=8192`.
+This requests `pipeline_type='1536_cascade'` (512 shape SLat, then the 1024 DiT aimed at 1536) and sets `TRELLIS_ALLOW_HIGH_RES=1`, so `pipeline.run()` does not redirect it to 512. Full 1536³ still needs ~49k sparse tokens, which does not fit 4 GB. On GPUs under 8 GB the 4-level VAE coord upsample is skipped (it TDRs on a dragon-like shape); occupancy is integer-scaled and the 1024 DiT still runs. Tokens default to `TRELLIS_MAX_TOKENS=12288` with floor `TRELLIS_MIN_HR=1024`. After `device not ready`, `wsl --shutdown` then retry with `TRELLIS_MAX_TOKENS=8192`.
 
 #### Web Demo
 
@@ -232,7 +232,7 @@ This requests `pipeline_type='1536_cascade'` (512 shape SLat, then the 1024 DiT 
 python app.py
 ```
 
-Then, you can access the demo at the address shown in the terminal.
+Then, you can access the demo at the address shown in the terminal. On a GPU under 8 GB the resolution control starts at 512, and Generate stays on that path even if 1024 or 1536 is selected.
 
 ### 2. PBR Texture Generation
 

@@ -1,5 +1,6 @@
 import os
 import unittest
+import unittest.mock
 
 import torch
 import torch.nn as nn
@@ -81,6 +82,13 @@ class OffloadTests(unittest.TestCase):
         self.assertIsNot(first, second)
         self.assertEqual(loads, ["dec", "dec"])
 
+    def test_drop_models_forgets_lazy_spec(self):
+        store = offload.LazyModelMap(lambda name, spec: TinyDiT(), {"dec": "spec"})
+        _ = store["dec"]
+        offload.drop_models(store, ["dec"])
+        with self.assertRaises(KeyError):
+            _ = store["dec"]
+
     def test_drop_models_removes_keys(self):
         store = {"a": TinyDiT(), "b": TinyDiT()}
         dropped = offload.drop_models(store, ["a", "missing"])
@@ -94,6 +102,26 @@ class OffloadTests(unittest.TestCase):
         self.assertTrue(offload.is_nested_block_model(nested))
         self.assertFalse(offload.should_dit_block_offload(nested))
         self.assertFalse(offload.is_nested_block_model(TinyDiT()))
+
+    def test_should_downgrade_explicit_cascade_on_small_gpu(self):
+        old = os.environ.get("TRELLIS_ALLOW_HIGH_RES")
+        os.environ.pop("TRELLIS_ALLOW_HIGH_RES", None)
+        try:
+            with unittest.mock.patch.object(offload, "gpu_total_memory_gb", return_value=4.0):
+                self.assertTrue(offload.should_downgrade_pipeline("1024_cascade"))
+                self.assertTrue(offload.should_downgrade_pipeline("1024"))
+                self.assertTrue(offload.should_downgrade_pipeline("1536_cascade"))
+                self.assertFalse(offload.should_downgrade_pipeline("512"))
+            with unittest.mock.patch.object(offload, "gpu_total_memory_gb", return_value=24.0):
+                self.assertFalse(offload.should_downgrade_pipeline("1024_cascade"))
+            os.environ["TRELLIS_ALLOW_HIGH_RES"] = "1"
+            with unittest.mock.patch.object(offload, "gpu_total_memory_gb", return_value=4.0):
+                self.assertFalse(offload.should_downgrade_pipeline("1024_cascade"))
+        finally:
+            if old is None:
+                os.environ.pop("TRELLIS_ALLOW_HIGH_RES", None)
+            else:
+                os.environ["TRELLIS_ALLOW_HIGH_RES"] = old
 
     def test_recommend_lr_tokens_env(self):
         old = os.environ.get("TRELLIS_LR_TOKENS")

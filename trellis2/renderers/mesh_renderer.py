@@ -2,6 +2,7 @@ from typing import *
 import torch
 from easydict import EasyDict as edict
 from ..representations.mesh import Mesh, MeshWithVoxel, MeshWithPbrMaterial, TextureFilterMode, AlphaMode, TextureWrapMode
+from .inputs import prepare_raster_inputs
 import torch.nn.functional as F
 
 
@@ -92,6 +93,10 @@ class MeshRenderer:
         antialias = self.rendering_options["antialias"]
         clamp_barycentric_coords = self.rendering_options["clamp_barycentric_coords"]
         
+        mesh, extrinsics, intrinsics, transformation = prepare_raster_inputs(
+            mesh, extrinsics, intrinsics, transformation, self.device
+        )
+
         if mesh.vertices.shape[0] == 0 or mesh.faces.shape[0] == 0:
             ret_dict = edict()
             for type in return_types:

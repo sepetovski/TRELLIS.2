@@ -70,6 +70,29 @@ def recommend_pipeline_type(threshold_gb: float = 8.0) -> Optional[str]:
     return None
 
 
+_HIGH_RES_PIPELINES = ("1024", "1024_cascade", "1536_cascade")
+
+
+def allow_high_res_pipeline() -> bool:
+    """Keep a requested 1024/1536 cascade on a GPU under 8 GB.
+
+    The Gradio demo always passes a pipeline type, so treating that as an
+    override skipped the 512 guard and the shape decoder TDRed.
+    Set TRELLIS_ALLOW_HIGH_RES=1 to opt in (example_1536.py does).
+    """
+    env = os.environ.get("TRELLIS_ALLOW_HIGH_RES", "").strip().lower()
+    return env in ("1", "true", "yes", "on")
+
+
+def should_downgrade_pipeline(pipeline_type: Optional[str]) -> bool:
+    """True when this cascade should run as 512 on the current GPU."""
+    if pipeline_type not in _HIGH_RES_PIPELINES:
+        return False
+    if allow_high_res_pipeline():
+        return False
+    return recommend_pipeline_type() == "512"
+
+
 def recommend_lr_tokens() -> Optional[int]:
     """
     Occupied-voxel cap for the 512 shape-SLat pass.
