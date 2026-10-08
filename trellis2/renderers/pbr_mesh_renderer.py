@@ -4,6 +4,7 @@ from easydict import EasyDict as edict
 import numpy as np
 import utils3d
 from ..representations.mesh import Mesh, MeshWithVoxel, MeshWithPbrMaterial, TextureFilterMode, AlphaMode, TextureWrapMode
+from .inputs import prepare_raster_inputs
 import torch.nn.functional as F
 
 
@@ -304,6 +305,10 @@ class PbrMeshRenderer:
         far = self.rendering_options["far"]
         ssaa = self.rendering_options["ssaa"]
         
+        mesh, extrinsics, intrinsics, transformation = prepare_raster_inputs(
+            mesh, extrinsics, intrinsics, transformation, self.device
+        )
+
         if mesh.vertices.shape[0] == 0 or mesh.faces.shape[0] == 0:
             out_dict = edict(
                 normal=torch.zeros((3, resolution, resolution), dtype=torch.float32, device=self.device),
