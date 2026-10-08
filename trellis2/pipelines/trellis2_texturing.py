@@ -8,6 +8,7 @@ from .base import Pipeline
 from . import samplers, rembg
 from ..modules.sparse import SparseTensor
 from ..modules import image_feature_extractor
+from ..utils.glb_inspect import restore_glb_axes
 import o_voxel
 import cumesh
 import nvdiffrast.torch as dr
@@ -345,9 +346,10 @@ class Trellis2TexturingPipeline(Pipeline):
             doubleSided=True,
         )
 
-        # Swap Y and Z axes, invert Y (common conversion for GLB compatibility)
-        vertices[:, 1], vertices[:, 2] = vertices[:, 2], -vertices[:, 1]
-        normals[:, 1], normals[:, 2] = normals[:, 2], -normals[:, 1]
+        # Swap Y and Z axes, invert Y (common conversion for GLB compatibility).
+        # vertex_normals is often a read-only cache, so the swap writes a copy.
+        vertices, normals = restore_glb_axes(vertices, normals)
+        uvs = np.array(uvs, copy=True)
         uvs[:, 1] = 1 - uvs[:, 1] # Flip UV V-coordinate
         
         textured_mesh = trimesh.Trimesh(
