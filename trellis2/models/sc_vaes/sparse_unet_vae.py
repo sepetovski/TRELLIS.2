@@ -155,8 +155,6 @@ class SparseResBlockUpsample3d(nn.Module):
     def _forward(self, x: sp.SparseTensor, subdiv: sp.SparseTensor = None) -> sp.SparseTensor:
         if self.pred_subdiv:
             subdiv = self.to_subdiv(x)
-            if not self.training:
-                subdiv = _cap_predicted_subdiv(subdiv, self.out_channels)
         h = x.replace(self.norm1(x.feats))
         h = h.replace(F.silu(h.feats))
         subdiv_binarized = subdiv.replace(subdiv.feats > 0) if subdiv is not None else None
@@ -243,8 +241,6 @@ class SparseResBlockC2S3d(nn.Module):
     def _forward(self, x: sp.SparseTensor, subdiv: sp.SparseTensor = None) -> sp.SparseTensor:
         if self.pred_subdiv:
             subdiv = self.to_subdiv(x)
-            if not self.training:
-                subdiv = _cap_predicted_subdiv(subdiv, self.out_channels)
         h = x.replace(self.norm1(x.feats))
         h = h.replace(F.silu(h.feats))
         h = self.conv1(h)
@@ -450,33 +446,6 @@ class SparseUnetVaeEncoder(nn.Module):
             return z
     
     
-def _cap_predicted_subdiv(subdiv: sp.SparseTensor, out_channels: int) -> sp.SparseTensor:
-    """Thin a shape decoder's own subdivision logits on a small GPU.
-
-    Texture decode passes guide subdiv in (`pred_subdiv=False`) and is capped
-    separately. This only runs when the block predicted the logits itself.
-    """
-    if subdiv is None:
-        return subdiv
-    cap = offload.recommend_shape_decode_voxels(out_channels)
-    feats = subdiv.feats
-    if cap is None or feats.ndim != 2:
-        return subdiv
-    before = int((feats > 0).sum().item())
-    limited = offload.limit_subdiv_feats(feats, cap)
-    after = int((limited > 0).sum().item())
-    if after >= before:
-        return subdiv
-    print(
-        f"[TRELLIS.2] Shape upsample kept {after} of {before} voxels "
-        f"(cap {cap} at {out_channels} channels) so the next conv does not TDR."
-    )
-    capped = subdiv.replace(limited)
-    if hasattr(capped, "clear_spatial_cache"):
-        capped.clear_spatial_cache()
-    return capped
-
-
 def _cap_guide_subdiv(subdiv: sp.SparseTensor, device) -> sp.SparseTensor:
     """Move one shape-decoder subdiv map onto `device`, thinning if it would TDR."""
     cap = offload.recommend_tex_decode_voxels()
