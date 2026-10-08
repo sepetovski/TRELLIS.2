@@ -8,6 +8,7 @@ from .base import Pipeline
 from . import samplers, rembg
 from ..modules.sparse import SparseTensor
 from ..modules import image_feature_extractor
+from ..utils import offload
 from ..utils.glb_inspect import restore_glb_axes
 import o_voxel
 import cumesh
@@ -143,18 +144,43 @@ class Trellis2TexturingPipeline(Pipeline):
         rgba = np.array(input.convert("RGBA"))
         rgb = rgba[:, :, :3]
         alpha = rgba[:, :, 3]
+        # A real cutout is fed through unchanged. A painted background is not,
+        # even when the filename says "cutout".
         if is_isolated_cutout(alpha):
-            return composite_original(rgb, alpha)
-        input_rgb = Image.fromarray(rgb)
-        with self._model_on_device(self.rembg_model):
-            output = self.rembg_model(input_rgb)
-        rgba = np.array(output.convert("RGBA"))
-        rgb = rgba[:, :, :3]
-        alpha = rgba[:, :, 3]
-        if subject_fraction(alpha) < 0.12:
-            rgb, alpha, _note = refine_foreground(rgb, alpha)
-            return composite_on_black(rgb, alpha)
-        return composite_original(rgb, alpha)
+            print("[TRELLIS.2] Existing cutout kept unchanged.")
+            image = composite_original(rgb, alpha)
+        else:
+            transparent = float((alpha < 8).mean())
+            print(
+                f"[TRELLIS.2] Photo is not cut out ({transparent:.0%} transparent). "
+                "Removing the background."
+            )
+            if self.rembg_model is None:
+                raise RuntimeError("background removal model is not loaded")
+            if self.low_vram:
+                # BiRefNet at 1024² does not fit a 4 GB card. The same step in
+                # image-to-3D already stays on CPU; putting it on this GPU TDRs.
+                print("[TRELLIS.2] Removing background on CPU (slow, but safe on 4 GB).")
+                self.rembg_model.cpu()
+                output = self.rembg_model(Image.fromarray(rgb))
+            else:
+                with self._model_on_device(self.rembg_model):
+                    output = self.rembg_model(Image.fromarray(rgb))
+            rgba = np.array(output.convert("RGBA"))
+            rgb = rgba[:, :, :3]
+            alpha = rgba[:, :, 3]
+            if subject_fraction(alpha) < 0.12:
+                rgb, alpha, note = refine_foreground(rgb, alpha)
+                print(f"[TRELLIS.2] {note}")
+                image = composite_on_black(rgb, alpha)
+            else:
+                frac = subject_fraction(alpha)
+                print(f"[TRELLIS.2] Background removed ({frac:.0%} of the photo). Mask kept as-is.")
+                image = composite_original(rgb, alpha)
+        if self.low_vram and getattr(self, "rembg_model", None) is not None:
+            offload.drop_module(self.rembg_model)
+            self.rembg_model = None
+        return image
         
     def get_cond(self, image: Union[torch.Tensor, list[Image.Image]], resolution: int, include_neg_cond: bool = True) -> dict:
         """
