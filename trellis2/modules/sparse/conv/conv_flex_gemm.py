@@ -3,8 +3,13 @@ import torch
 import torch.nn as nn
 from .. import SparseTensor
 from . import config
+from .tile import build_coord_lookup, core_with_halo
+from ....utils import offload
 import flex_gemm
 from flex_gemm.ops.spconv import sparse_submanifold_conv3d
+
+_TILE_LOGGED = False
+_ALGO_LOGGED = False
 
 
 def sparse_conv3d_init(self, in_channels, out_channels, kernel_size, stride=1, dilation=1, padding=None, bias=True, indice_key=None):
@@ -34,9 +39,81 @@ def sparse_conv3d_init(self, in_channels, out_channels, kernel_size, stride=1, d
     self.weight = nn.Parameter(self.weight.permute(0, 2, 3, 4, 1).contiguous())
 
 
-def sparse_conv3d_forward(self, x: SparseTensor) -> SparseTensor:
-    flex_gemm.ops.spconv.set_algorithm(config.FLEX_GEMM_ALGO)
+def _apply_flex_runtime():
+    global _ALGO_LOGGED
+    algo = offload.recommend_flex_algo() or config.FLEX_GEMM_ALGO
+    flex_gemm.ops.spconv.set_algorithm(algo)
     flex_gemm.ops.spconv.set_hashmap_ratio(config.FLEX_GEMM_HASHMAP_RATIO)
+    if algo != config.FLEX_GEMM_ALGO and not _ALGO_LOGGED:
+        print(
+            f"[TRELLIS.2] Sparse conv algorithm {algo} "
+            f"(library default is {config.FLEX_GEMM_ALGO}). "
+            "Set TRELLIS_FLEX_ALGO to override."
+        )
+        _ALGO_LOGGED = True
+    return algo
+
+
+def _conv_once(module, feats, coords, shape):
+    out, _neighbor_cache = sparse_submanifold_conv3d(
+        feats,
+        coords,
+        shape,
+        module.weight,
+        module.bias,
+        None,
+        module.dilation,
+    )
+    return out
+
+
+def _tiled_sparse_conv3d_forward(module, x: SparseTensor, chunk: int) -> SparseTensor:
+    """Run one submanifold conv in haloed chunks. Output matches the full conv."""
+    global _TILE_LOGGED
+    feats = x.feats
+    coords = x.coords
+    n = feats.shape[0]
+    shape = torch.Size([*x.shape, *x.spatial_shape])
+    lookup = build_coord_lookup(coords)
+    if not _TILE_LOGGED:
+        print(
+            f"[TRELLIS.2] Tiling sparse conv: {n} voxels in chunks of {chunk} "
+            "(halo included, same result as one launch). "
+            "Set TRELLIS_CONV_CHUNK=0 to disable."
+        )
+        _TILE_LOGGED = True
+    parts = []
+    for start in range(0, n, chunk):
+        end = min(start + chunk, n)
+        core = torch.arange(start, end, device=coords.device)
+        selected = core_with_halo(
+            coords,
+            core,
+            kernel_size=module.kernel_size,
+            dilation=module.dilation,
+            lookup=lookup,
+        )
+        out = _conv_once(module, feats[selected].contiguous(), coords[selected].contiguous(), shape)
+        parts.append(out[: end - start])
+        del out
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    return x.replace(torch.cat(parts, dim=0))
+
+
+def sparse_conv3d_forward(self, x: SparseTensor) -> SparseTensor:
+    _apply_flex_runtime()
+
+    chunk = offload.recommend_conv_chunk()
+    # Only the 3×3×3 VAE convs are tiled. The halo math matches that kernel,
+    # which is the launch that TDRs 4 GB at the finest decoder level.
+    if (
+        chunk
+        and x.feats.shape[0] > chunk
+        and tuple(self.kernel_size) == (3, 3, 3)
+        and not self.training
+    ):
+        return _tiled_sparse_conv3d_forward(self, x, chunk)
 
     # check if neighbor map is already computed
     Co, Kd, Kh, Kw, Ci = self.weight.shape

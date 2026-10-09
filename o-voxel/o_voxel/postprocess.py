@@ -140,7 +140,19 @@ def to_glb(
         # Step 2: Clean up topology (duplicates, non-manifolds, isolated parts)
         mesh.remove_duplicate_faces()
         mesh.repair_non_manifold_edges()
-        mesh.remove_small_connected_components(1e-5)
+        # Tiny meshes (a few thousand faces) make this CUDA kernel launch with
+        # an invalid grid (error 9). Skip rather than kill the context.
+        if getattr(mesh, "num_faces", 0) >= 2048:
+            try:
+                mesh.remove_small_connected_components(1e-5)
+            except Exception as e:
+                if verbose:
+                    print(f"remove_small_connected_components skipped ({e})")
+        elif verbose:
+            print(
+                f"Skipping remove_small_connected_components "
+                f"({getattr(mesh, 'num_faces', 0)} faces)."
+            )
         mesh.fill_holes(max_hole_perimeter=3e-2)
         if verbose:
             print(f"After initial cleanup: {mesh.num_vertices} vertices, {mesh.num_faces} faces")
@@ -153,7 +165,19 @@ def to_glb(
         # Step 4: Final Cleanup loop
         mesh.remove_duplicate_faces()
         mesh.repair_non_manifold_edges()
-        mesh.remove_small_connected_components(1e-5)
+        # Tiny meshes (a few thousand faces) make this CUDA kernel launch with
+        # an invalid grid (error 9). Skip rather than kill the context.
+        if getattr(mesh, "num_faces", 0) >= 2048:
+            try:
+                mesh.remove_small_connected_components(1e-5)
+            except Exception as e:
+                if verbose:
+                    print(f"remove_small_connected_components skipped ({e})")
+        elif verbose:
+            print(
+                f"Skipping remove_small_connected_components "
+                f"({getattr(mesh, 'num_faces', 0)} faces)."
+            )
         mesh.fill_holes(max_hole_perimeter=3e-2)
         if verbose:
             print(f"After final cleanup: {mesh.num_vertices} vertices, {mesh.num_faces} faces")

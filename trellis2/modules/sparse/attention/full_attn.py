@@ -1,7 +1,60 @@
 from typing import *
 import torch
+import torch.nn.functional as F
 from .. import VarLenTensor
 from .. import config
+
+
+_SDPA_FALLBACK_LOGGED = False
+
+
+def _resolve_attn_backend() -> str:
+    """Use PyTorch SDPA when flash-attn is selected but not installed.
+
+    flash-attn often fails to build under WSL. SDPA's memory-efficient
+    kernels are the same math and do not need that package.
+    """
+    global _SDPA_FALLBACK_LOGGED
+    backend = config.ATTN
+    if backend == "sdpa":
+        return backend
+    if backend not in ("flash_attn", "flash_attn_3"):
+        return backend
+    module = "flash_attn" if backend == "flash_attn" else "flash_attn_interface"
+    try:
+        __import__(module)
+    except Exception:
+        if not _SDPA_FALLBACK_LOGGED:
+            print(f"[SPARSE] {module} is not importable; using PyTorch SDPA.")
+            _SDPA_FALLBACK_LOGGED = True
+        return "sdpa"
+    return backend
+
+
+def _sdpa_varlen(q, k, v, q_seqlen, kv_seqlen):
+    """Variable-length SDPA. Query is chunked so the math backend cannot allocate N²."""
+    q_chunk = 512
+    outs = []
+    q_off = 0
+    kv_off = 0
+    for qs, ks in zip(q_seqlen, kv_seqlen):
+        qq = q[q_off:q_off + qs].permute(1, 0, 2).unsqueeze(0)
+        kk = k[kv_off:kv_off + ks].permute(1, 0, 2).unsqueeze(0)
+        vv = v[kv_off:kv_off + ks].permute(1, 0, 2).unsqueeze(0)
+        if qs > q_chunk:
+            pieces = [
+                F.scaled_dot_product_attention(qq[:, :, start:start + q_chunk], kk, vv)
+                for start in range(0, qs, q_chunk)
+            ]
+            oo = torch.cat(pieces, dim=2)
+        else:
+            oo = F.scaled_dot_product_attention(qq, kk, vv)
+        outs.append(oo.squeeze(0).permute(1, 0, 2).contiguous())
+        q_off += qs
+        kv_off += ks
+    if not outs:
+        return q[:0]
+    return torch.cat(outs, dim=0)
 
 
 __all__ = [
@@ -169,7 +222,8 @@ def sparse_scaled_dot_product_attention(*args, **kwargs):
             k = k.reshape(N * L, H, CI)     # [T_KV, H, Ci]
             v = v.reshape(N * L, H, CO)     # [T_KV, H, Co]
 
-    if config.ATTN == 'xformers':
+    backend = _resolve_attn_backend()
+    if backend == 'xformers':
         if 'xops' not in globals():
             import xformers.ops as xops
         if num_all_args == 1:
@@ -181,7 +235,7 @@ def sparse_scaled_dot_product_attention(*args, **kwargs):
         v = v.unsqueeze(0)
         mask = xops.fmha.BlockDiagonalMask.from_seqlens(q_seqlen, kv_seqlen)
         out = xops.memory_efficient_attention(q, k, v, mask)[0]
-    elif config.ATTN == 'flash_attn':
+    elif backend == 'flash_attn':
         if 'flash_attn' not in globals():
             import flash_attn
         cu_seqlens_q = torch.cat([torch.tensor([0]), torch.cumsum(torch.tensor(q_seqlen), dim=0)]).int().to(device)
@@ -193,7 +247,7 @@ def sparse_scaled_dot_product_attention(*args, **kwargs):
             out = flash_attn.flash_attn_varlen_kvpacked_func(q, kv, cu_seqlens_q, cu_seqlens_kv, max(q_seqlen), max(kv_seqlen))
         elif num_all_args == 3:
             out = flash_attn.flash_attn_varlen_func(q, k, v, cu_seqlens_q, cu_seqlens_kv, max(q_seqlen), max(kv_seqlen))
-    elif config.ATTN == 'flash_attn_3':
+    elif backend == 'flash_attn_3':
         if 'flash_attn_3' not in globals():
             import flash_attn_interface as flash_attn_3
         cu_seqlens_q = torch.cat([torch.tensor([0]), torch.cumsum(torch.tensor(q_seqlen), dim=0)]).int().to(device)
@@ -211,6 +265,12 @@ def sparse_scaled_dot_product_attention(*args, **kwargs):
             max_q_seqlen = max(q_seqlen)
             max_kv_seqlen = max(kv_seqlen)
         out = flash_attn_3.flash_attn_varlen_func(q, k, v, cu_seqlens_q, cu_seqlens_kv, max_q_seqlen, max_kv_seqlen)
+    elif backend == 'sdpa':
+        if num_all_args == 1:
+            q, k, v = qkv.unbind(dim=1)
+        elif num_all_args == 2:
+            k, v = kv.unbind(dim=1)
+        out = _sdpa_varlen(q, k, v, q_seqlen, kv_seqlen)
     else:
         raise ValueError(f"Unknown attention module: {config.ATTN}")
     

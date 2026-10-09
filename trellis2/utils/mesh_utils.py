@@ -266,3 +266,64 @@ def write_pbr_ply(
         PlyElement.describe(face_data, 'face'),
     ], text=ascii)
     ply_data.write(filename)
+
+
+def snapshot_mesh_numpy(mesh):
+    """Copy vertices/faces to CPU before a CUDA export path can kill the context."""
+    vertices = mesh.vertices.detach().float().cpu().numpy().copy()
+    faces = mesh.faces.detach().cpu().numpy().copy()
+    return vertices, faces
+
+
+def export_plain_glb(path, vertices_np, faces_np) -> str:
+    """Write an untextured GLB. Safe after a CUDA context death."""
+    import trimesh
+    v = np.asarray(vertices_np, dtype=np.float32).copy()
+    f = np.asarray(faces_np, dtype=np.int32)
+    if v.shape[0] == 0 or f.shape[0] == 0:
+        raise ValueError("Cannot export an empty mesh")
+    # Same Y/Z swap as o_voxel.postprocess.to_glb
+    y = v[:, 1].copy()
+    v[:, 1] = v[:, 2]
+    v[:, 2] = -y
+    trimesh.Trimesh(vertices=v, faces=f, process=False).export(path)
+    return path
+
+
+def export_pbr_glb(mesh, path, *, texture_size=1024, decimation_target=100000, remesh=False) -> str:
+    """
+    Bake a PBR GLB via o_voxel. If cuMesh cleanup crashes (tiny 1536 meshes
+    after integer-scaled occupancy), write a plain GLB from a CPU snapshot.
+    """
+    import o_voxel
+
+    cpu_vertices, cpu_faces = snapshot_mesh_numpy(mesh)
+    n_faces = int(cpu_faces.shape[0])
+    try:
+        if n_faces < 2048:
+            raise RuntimeError(
+                f"mesh too small for cuMesh cleanup ({n_faces} faces); using plain GLB"
+            )
+        glb = o_voxel.postprocess.to_glb(
+            vertices=mesh.vertices,
+            faces=mesh.faces,
+            attr_volume=mesh.attrs,
+            coords=mesh.coords,
+            attr_layout=mesh.layout,
+            voxel_size=mesh.voxel_size,
+            aabb=[[-0.5, -0.5, -0.5], [0.5, 0.5, 0.5]],
+            decimation_target=decimation_target,
+            texture_size=texture_size,
+            remesh=remesh,
+            remesh_band=1,
+            remesh_project=0,
+            verbose=True,
+        )
+        glb.export(path, extension_webp=True)
+        print(f"Wrote {path}")
+        return path
+    except Exception as e:
+        print(f"[TRELLIS.2] PBR GLB export failed ({e})")
+        export_plain_glb(path, cpu_vertices, cpu_faces)
+        print(f"Wrote {path} (untextured fallback)")
+        return path

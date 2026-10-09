@@ -57,7 +57,7 @@ Data processing is streamlined for instant conversions that are fully **renderin
 
 ### Prerequisites
 - **System**: The code is currently tested only on **Linux**.
-- **Hardware**: An NVIDIA GPU with at least 24GB of memory is necessary. The code has been verified on NVIDIA A100 and H100 GPUs.  
+- **Hardware**: An NVIDIA GPU with at least 24GB of memory is necessary for the default 1024³ cascade. The code has been verified on NVIDIA A100 and H100 GPUs. GPUs with 4–12 GB can run the 512³ pipeline using sequential CPU offload (see [Low-VRAM / 4 GB GPUs](#low-vram--4-gb-gpus)).  
 - **Software**:   
   - The [CUDA Toolkit](https://developer.nvidia.com/cuda-toolkit-archive) is needed to compile certain packages. Recommended version is 12.4.  
   - [Conda](https://docs.anaconda.com/miniconda/install/#quick-command-line-install) is recommended for managing dependencies.  
@@ -172,6 +172,73 @@ Upon execution, the script generates the following files:
  - `sample.glb`: The extracted PBR-ready 3D asset in GLB format.
 
 **Note:** The `.glb` file is exported in `OPAQUE` mode by default. Although the alpha channel is preserved within the texture map, it is not active initially. To enable transparency, import the asset into your 3D software and manually connect the texture's alpha channel to the material's opacity or alpha input.
+
+`example.py` auto-detects GPUs under 8 GB and loads only the 512³ checkpoints with block-level CPU offload. On a 4 GB card (for example an RTX 3050 laptop in WSL) you can also run:
+
+```sh
+python example_low_vram.py
+```
+
+The GLB is named after the input image (`house.png` → `house.glb`).
+
+### Low-VRAM / 4 GB GPUs
+
+TRELLIS.2 is a **cascade of independently trained modules** (sparse-structure DiT, 512 shape SLat, 1024 shape SLat, texture SLat, VAEs), not one 4B forward. One 1.3B bf16 DiT is ~2.6 GB of weights. Loading that whole network and then running classifier-free guidance twice fills a 4 GB card, kernels stall, and Windows reports `CUDA driver error: device not ready`.
+
+`example_low_vram.py` is the 4 GB entry point. It:
+
+1. **Streams transformer blocks CPU ↔ GPU one layer at a time** (`block_offload`).
+2. **Runs guidance one pass at a time** and **chunks the MLP**, so the 512 shape pass can keep the 8192-token training budget instead of a 4096 panic cap. Occupancy above that budget is thinned interior-first. It is never 2×2×2-binned.
+3. **Tiles large sparse convolutions** in the VAE (halo included, same result) and uses the `implicit_gemm` conv algorithm so the split-K workspace cannot allocate the rest of the card.
+4. **Runs the learned cascade upsampler** on the way to 1024³, stopping only if a level is already past `TRELLIS_UPSAMPLE_VOXELS` (default 1.5M on 4 GB). Skipping it entirely (`TRELLIS_UPSAMPLE_VOXELS=0`) is the old fallback and looks worse.
+5. **Bakes a 1024² texture / 100k-face GLB** by default. A 4096² bake is what resets the card after a successful mesh. Try `TRELLIS_TEXTURE_SIZE=2048` only after raising `TdrDelay`.
+
+512³:
+
+```sh
+python example_low_vram.py assets/example_image/T.png
+```
+
+1024³ (slow, same 4 GB card):
+
+```sh
+TRELLIS_PIPELINE_TYPE=1024_cascade python example_low_vram.py your_cutout.png
+```
+
+Best inputs are the images you already generate for the game: one object, centered, full object in frame, transparent PNG, no ground and no text. TRELLIS does not read the style prompt; it only sees the picture. A real alpha channel is kept. The preprocessed image is written next to the GLB (`chest.preprocessed.png`).
+
+`pipeline.run()` still defaults to `pipeline_type='512'` on GPUs under 8 GB unless you pass `1024_cascade`. `from_pretrained(..., pipeline_type='512')` does not load the 1024 checkpoints.
+
+```python
+from trellis2.pipelines import Trellis2ImageTo3DPipeline
+
+pipeline = Trellis2ImageTo3DPipeline.from_pretrained(
+    "microsoft/TRELLIS.2-4B",
+    pipeline_type="512",
+)
+pipeline.low_vram = True
+pipeline.block_offload = True   # optional; auto-enabled on ≤12 GB
+pipeline.cuda()
+mesh = pipeline.run(image, pipeline_type="512")[0]
+```
+
+WSL notes:
+
+- Close other GPU apps. Windows + WDDM already reserve a few hundred MiB (a 4096 MiB laptop GPU often shows ~3640 MiB usable).
+- Raise Windows `TdrDelay` once, from an elevated PowerShell, then reboot: `powershell -ExecutionPolicy Bypass -File scripts/windows_tdr.ps1`. That does not add VRAM. It lets a slow kernel finish. It did not help when the card was already full; it does help now that each launch is smaller.
+- Live tracing: `TRELLIS_VRAM_LOG=1 python example_low_vram.py` and `watch -n 0.5 nvidia-smi`.
+- After a `device not ready` fault, CUDA stays dead until WSL is reset. In PowerShell run `wsl --shutdown`, then reopen Ubuntu. The 512 path parks the second guidance pass on CPU and keeps up to 8192 voxels (`TRELLIS_LR_TOKENS`). Sprites already on black or white skip rembg (`TRELLIS_FORCE_REMBG=1` to override).
+- A bare `Killed` (no Python traceback) is the **Linux OOM killer** — WSL ran out of *system RAM*, not VRAM. Each finished 1.3B DiT is deleted after its stage. Give WSL more RAM in `%UserProfile%\\.wslconfig` (`memory=16GB`, `swap=32GB`) and run `wsl --shutdown`.
+
+#### Experimental 1536³ cascade (`example_1536.py`)
+
+`example_low_vram.py` stays on the proven 512³ path. To *try* higher resolution on the same 4 GB card, use a separate script:
+
+```sh
+python example_1536.py yourphoto.png
+```
+
+This requests `pipeline_type='1536_cascade'` (512 shape SLat, then the 1024 DiT aimed at 1536). Full 1536³ still wants far more tokens than a 4 GB card should hold at once. The learned VAE upsample runs with tiled convs; tokens default to `TRELLIS_MAX_TOKENS=12288` with floor `TRELLIS_MIN_HR=1024`, so the result is 1024–1536, never a silent 512 fall-back. For a game asset, `example_low_vram.py` at 512³ or `TRELLIS_PIPELINE_TYPE=1024_cascade` is the better default. After `device not ready`, `wsl --shutdown` then retry with `TRELLIS_MAX_TOKENS=8192`.
 
 #### Web Demo
 
