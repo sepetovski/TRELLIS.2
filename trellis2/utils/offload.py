@@ -74,9 +74,11 @@ def recommend_lr_tokens() -> Optional[int]:
     """
     Occupied-voxel cap for the 512 shape-SLat pass.
 
-    Dual CFG at ~5840 house tokens TDRs 4 GB. Cap at 4096 by dropping
-    interior voxels (keep the silhouette / staff / brim). Never 2×2×2-bin
-    the 32³ grid. Override with TRELLIS_LR_TOKENS.
+    The 512 shape model is trained with up to 8192 tokens. Sequential CFG
+    plus chunked MLPs keep a single forward inside 4 GB at that count, so
+    the cap is the training budget rather than the old 4096 panic limit.
+    Voxels above the cap are dropped interior-first. Never 2×2×2-bin the
+    32³ grid. Override with TRELLIS_LR_TOKENS.
     """
     env = os.environ.get("TRELLIS_LR_TOKENS", "").strip()
     if env:
@@ -84,11 +86,6 @@ def recommend_lr_tokens() -> Optional[int]:
     total = gpu_total_memory_gb()
     if total <= 0:
         return None
-    if total < 6:
-        # Dual CFG at ~5–6k tokens TDRs 4 GB (house.png, RMSNorm `device not
-        # ready`). Interior-first to 4096 keeps a character silhouette;
-        # 2×2×2 binning is what collapsed mage to ~900 voxels.
-        return 4096
     if total < 8:
         return 8192
     return None
@@ -126,7 +123,7 @@ def recommend_sequential_cfg(x=None, gpu_gb: Optional[float] = None) -> bool:
     else:
         tokens = sparse_token_count(x)
         total = gpu_total_memory_gb() if gpu_gb is None else gpu_gb
-        enabled = bool(tokens >= 2048 and total > 0 and total < 6)
+        enabled = bool(tokens >= 2048 and total > 0 and total < 8)
     if enabled:
         global _SEQ_CFG_LOGGED
         if not _SEQ_CFG_LOGGED:
@@ -140,14 +137,72 @@ def recommend_sequential_cfg(x=None, gpu_gb: Optional[float] = None) -> bool:
     return enabled
 
 
+def recommend_hr_tokens() -> Optional[int]:
+    """
+    Token budget for the 1024 shape DiT.
+
+    None means use the caller's budget (the official cascade allows 49152,
+    which does not fit 4 GB even one block at a time). Override with
+    TRELLIS_MAX_TOKENS.
+    """
+    env = os.environ.get("TRELLIS_MAX_TOKENS", "").strip()
+    if env:
+        return int(env)
+    total = gpu_total_memory_gb()
+    if total <= 0:
+        return None
+    if total < 6:
+        return 12288
+    if total < 8:
+        return 16384
+    return None
+
+
+def recommend_conv_chunk() -> Optional[int]:
+    """
+    Max voxels per sparse-conv launch. None runs the whole grid at once.
+
+    The finest VAE level of a 512³ character is about 1–2M voxels. One
+    3×3×3 conv there is large enough for Windows to reset a 4 GB GPU.
+    Tiling with a halo keeps the result and shortens each launch.
+    """
+    env = os.environ.get("TRELLIS_CONV_CHUNK", "").strip().lower()
+    if env in ("0", "off", "none", "full"):
+        return None
+    if env:
+        return int(env)
+    total = gpu_total_memory_gb()
+    if total > 0 and total < 8:
+        return 262144
+    return None
+
+
+def recommend_flex_algo() -> Optional[str]:
+    """
+    Sparse-conv algorithm override.
+
+    `masked_implicit_gemm_splitk` autotunes a float32 workspace of shape
+    (SPLITK, N, Co). On 4 GB that workspace is the conv TDR. `implicit_gemm`
+    keeps a single output buffer. None keeps the library default.
+    """
+    env = os.environ.get("TRELLIS_FLEX_ALGO", "").strip()
+    if env:
+        return env
+    total = gpu_total_memory_gb()
+    if total > 0 and total < 8:
+        return "implicit_gemm"
+    return None
+
+
 def recommend_upsample_voxels() -> Optional[int]:
     """
-    Max voxels allowed during cascade VAE C2S upsample.
+    Stop learned cascade upsampling once a level already holds this many
+    voxels, then integer-scale whatever resolution is left.
 
-    0 means skip the 4-level VAE upsample and integer-scale LR occupancy
-    (required on 4 GB — that C2S is what TDRs dragon.png after the 512 pass).
-    None means run the full VAE upsample. Override with TRELLIS_UPSAMPLE_VOXELS
-    (`0`, a count, or `full`).
+    0 skips every learned level (the old 4 GB workaround; it drops the
+    surface the VAE was trained to predict). None runs every level. Tiled
+    conv is what keeps a level inside 4 GB, so the default is no longer 0.
+    Override with TRELLIS_UPSAMPLE_VOXELS (`0`, a count, or `full`).
     """
     env = os.environ.get("TRELLIS_UPSAMPLE_VOXELS", "").strip().lower()
     if env in ("full", "off", "none"):
@@ -155,8 +210,10 @@ def recommend_upsample_voxels() -> Optional[int]:
     if env:
         return int(env)
     total = gpu_total_memory_gb()
+    if total > 0 and total < 6:
+        return 1_500_000
     if total > 0 and total < 8:
-        return 0
+        return 2_000_000
     return None
 
 

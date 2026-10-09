@@ -6,6 +6,7 @@ from ..linear import SparseLinear
 from ..nonlinearity import SparseGELU
 from ..attention import SparseMultiHeadAttention
 from ...norm import LayerNorm32
+from ....utils.chunked import mlp_chunk_size
 
 
 class SparseFeedForwardNet(nn.Module):
@@ -18,7 +19,19 @@ class SparseFeedForwardNet(nn.Module):
         )
 
     def forward(self, x: VarLenTensor) -> VarLenTensor:
-        return self.mlp(x)
+        chunk = mlp_chunk_size(x.feats.shape[0])
+        if chunk is None:
+            return self.mlp(x)
+        parts = []
+        n = x.feats.shape[0]
+        for start in range(0, n, chunk):
+            end = min(start + chunk, n)
+            piece = x.replace(
+                x.feats[start:end].contiguous(),
+                x.coords[start:end].contiguous(),
+            )
+            parts.append(self.mlp(piece).feats)
+        return x.replace(torch.cat(parts, dim=0))
 
 
 class SparseTransformerBlock(nn.Module):

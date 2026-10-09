@@ -251,8 +251,22 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         """
         self._ensure_image_cond()
         self.image_cond_model.image_size = resolution
-        with self._model_on_device(self.image_cond_model):
+        try:
+            with self._model_on_device(self.image_cond_model):
+                cond = self.image_cond_model(image)
+        except RuntimeError as exc:
+            message = str(exc).lower()
+            if "out of memory" not in message and "not ready" not in message:
+                raise
+            print(
+                "[TRELLIS.2] Image encoder did not fit in VRAM; running it on CPU. "
+                "This happens once per resolution and is slow."
+            )
+            offload.release_cuda_memory()
+            self.image_cond_model.cpu()
             cond = self.image_cond_model(image)
+            if hasattr(cond, "to"):
+                cond = cond.to(self.device)
         if not include_neg_cond:
             return {'cond': cond}
         neg_cond = torch.zeros_like(cond)
@@ -452,6 +466,15 @@ class Trellis2ImageTo3DPipeline(Pipeline):
                 break
             hr_resolution -= 128
 
+        if max_num_tokens and coords.shape[0] > max_num_tokens:
+            before = int(coords.shape[0])
+            coords = offload.cap_sparse_coords(coords, max_num_tokens)
+            print(
+                f"[TRELLIS.2] High-res occupancy {before} → {int(coords.shape[0])} "
+                f"at {hr_resolution}³. Interior voxels were dropped first so the "
+                f"silhouette stays on the {hr_resolution} grid (budget {max_num_tokens})."
+            )
+
         flow_model = self._resolve_flow_model(flow_model if hr_key is None else hr_key)
         # Sample structured latent
         noise = SparseTensor(
@@ -629,8 +652,8 @@ class Trellis2ImageTo3DPipeline(Pipeline):
             return_latent (bool): Whether to return the latent codes.
             pipeline_type (str): The type of the pipeline. Options: '512', '1024', '1024_cascade', '1536_cascade'.
             max_num_tokens (int): The maximum number of tokens to use.
-            min_hr_resolution (int): Floor resolution for cascade upsampling. Defaults
-                to 512 on GPUs under 8 GB so token count can actually be capped.
+            min_hr_resolution (int): Lowest cascade resolution. An explicit 1024 or
+                1536 request stays at least at 1024; extra tokens are thinned instead.
         """
         requested_type = pipeline_type
         pipeline_type = pipeline_type or self.default_pipeline_type
@@ -645,7 +668,12 @@ class Trellis2ImageTo3DPipeline(Pipeline):
                 )
                 pipeline_type = '512'
         if min_hr_resolution is None:
-            min_hr_resolution = 512 if gpu_gb and gpu_gb < 8 else 1024
+            if requested_type in ("1024", "1024_cascade", "1536_cascade"):
+                # Stay on the requested grid. Extra tokens are thinned later
+                # instead of quietly falling back to a 512 mesh.
+                min_hr_resolution = 1024
+            else:
+                min_hr_resolution = 512 if gpu_gb and gpu_gb < 8 else 1024
         # Only auto-cap tokens on the default 512 path. Explicit 1024/1536
         # cascades pass their own budget.
         if (
@@ -656,6 +684,14 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         ):
             max_num_tokens = 8192
             print(f"[TRELLIS.2] Capping max_num_tokens to {max_num_tokens} for <8 GB VRAM.")
+        hr_cap = offload.recommend_hr_tokens()
+        if pipeline_type != "512" and hr_cap and max_num_tokens > hr_cap:
+            print(
+                f"[TRELLIS.2] Capping high-res tokens {max_num_tokens} → {hr_cap} "
+                "so the 1024 DiT stays inside a 4 GB card. "
+                "Override with TRELLIS_MAX_TOKENS."
+            )
+            max_num_tokens = hr_cap
         # Check pipeline type
         if pipeline_type == '512':
             assert 'shape_slat_flow_model_512' in self.models, "No 512 resolution shape SLat flow model found."

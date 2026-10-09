@@ -10,8 +10,9 @@ token count is too high, TRELLIS.2 lowers resolution 128 at a time until
 it fits `max_num_tokens`, but not below `min_hr_resolution` (default 1024).
 
 So you may get 1536, 1408, …, or 1024 — not a silent fall-back to 512.
-On 4 GB the 4-level VAE coord upsample is skipped (it TDRs); occupancy is
-integer-scaled and the 1024 DiT still runs. After `device not ready`:
+On 4 GB the learned VAE upsample runs, with sparse convs tiled so a level
+does not TDR; set TRELLIS_UPSAMPLE_VOXELS=0 to force the old integer scale.
+After `device not ready`:
 
     wsl --shutdown
     TRELLIS_MAX_TOKENS=8192 python example_1536.py photo.png
@@ -20,10 +21,6 @@ Keep using example_low_vram.py when you want the proven 512³ path.
 
 Usage:
     conda activate trellis2
-    cd ~/TRELLIS.2
-    git fetch fork cursor/low-vram-block-offload-3548
-    git checkout cursor/low-vram-block-offload-3548
-    git pull fork cursor/low-vram-block-offload-3548
     python example_1536.py yourphoto.png
 """
 import os
@@ -80,7 +77,7 @@ def main():
     if not os.path.isfile(image_path):
         raise FileNotFoundError(
             f"Image not found: {image_path}\n"
-            "  python example_1536.py /home/damjan/TRELLIS.2/myphoto.png\n"
+            "  python example_1536.py /mnt/c/Users/<you>/Pictures/chest.png\n"
             "Windows files: /mnt/c/Users/<you>/Desktop/myphoto.png"
         )
     print(f"Using image: {os.path.abspath(image_path)}")

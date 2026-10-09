@@ -3,6 +3,7 @@ import torch
 import torch.nn as nn
 from ..attention import MultiHeadAttention
 from ..norm import LayerNorm32
+from ...utils.chunked import chunked_token_apply, mlp_chunk_size
 
 
 class AbsolutePositionEmbedder(nn.Module):
@@ -56,7 +57,7 @@ class FeedForwardNet(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.mlp(x)
+        return chunked_token_apply(x, self.mlp, mlp_chunk_size(x.shape[0]))
 
 
 class TransformerBlock(nn.Module):
